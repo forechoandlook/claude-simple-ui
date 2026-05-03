@@ -1,0 +1,54 @@
+/* ── Sidebar responsive ──────────────────────────────────────────────────── */
+@media (min-width: 641px) { #hamburger { display: none !important; } }
+@media (max-width: 640px) {
+  #sidebar {
+    position: fixed; top: 44px; left: 0; bottom: 0;
+    transform: translateX(-100%); z-index: 10;
+    transition: transform .2s ease;
+  }
+  #sidebar.open { transform: translateX(0); box-shadow: 4px 0 20px rgba(0,0,0,.4); }
+}
+
+/* ── Markdown rendering ──────────────────────────────────────────────────── */
+.md h1,.md h2,.md h3 { font-weight: 600; margin: .7em 0 .25em; line-height: 1.3; }
+.md h1 { font-size: 1.15em; }
+.md h2 { font-size: 1.05em; }
+.md h3 { font-size: .95em; }
+.md p { margin: .4em 0; }
+.md ul,.md ol { padding-left: 1.4em; margin: .35em 0; }
+.md li { margin: .15em 0; }
+.md code { background: rgba(255,255,255,.08); border-radius: 3px; padding: 1px 5px; font-family: monospace; font-size: .88em; }
+.md pre { background: #0d1117; border: 1px solid oklch(var(--b3)); border-radius: 6px; padding: 10px; margin: .4em 0; overflow-x: auto; }
+.md pre code { background: none; padding: 0; font-size: .85em; }
+.md blockquote { border-left: 3px solid oklch(var(--b3)); color: oklch(var(--bc)/.6); padding-left: .75em; margin: .4em 0; }
+.md a { color: oklch(var(--p)); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md table { border-collapse: collapse; width: 100%; margin: .4em 0; font-size: .9em; }
+.md th,.md td { border: 1px solid oklch(var(--b3)); padding: 4px 8px; text-align: left; }
+.md th { background: oklch(var(--b3)); }
+.md p:first-child { margin-top: 0; }
+.md p:last-child { margin-bottom: 0; }
+.md hr { border: none; border-top: 1px solid oklch(var(--b3)); margin: .6em 0; }
+
+/* ── Diff colors ─────────────────────────────────────────────────────────── */
+.diff-add  { color: oklch(var(--su)); }
+.diff-del  { color: oklch(var(--er)); }
+.diff-hunk { color: oklch(var(--in)); }
+.diff-head { color: oklch(var(--bc)/.5); }
+
+/* ── Typing dots ─────────────────────────────────────────────────────────── */
+.dot { width: 5px; height: 5px; background: currentColor; border-radius: 50%; display: inline-block; animation: blink 1.2s infinite; }
+.dot:nth-child(2) { animation-delay: .4s; }
+.dot:nth-child(3) { animation-delay: .8s; }
+@keyframes blink { 0%,80%,100% { opacity:.2 } 40% { opacity:1 } }
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(var(--b3)); border-radius: 2px; }
+
+/* ── Tool card expand ────────────────────────────────────────────────────── */
+.tool-detail { display: none; }
+.tool-card.open .tool-detail { display: block; }
+.tool-card.open .tool-chevron { transform: rotate(90deg); }
+.tool-chevron { transition: transform .15s; display: inline-block; }
