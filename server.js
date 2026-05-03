@@ -389,11 +389,11 @@ app.post('/api/projects/:id/file', authMiddleware, (req, res) => {
 });
 
 app.use(express.json({ limit: '10mb' }));
-// Serve dist/ in production, public/ in dev
-const staticDir = fsSync.existsSync(path.join(__dirname, 'dist')) && process.env.NODE_ENV !== 'development'
-  ? path.join(__dirname, 'dist')
-  : path.join(__dirname, 'public');
-app.use(express.static(staticDir));
+// Serve dist/ in production (assets loaded from jsDelivr CDN), public/ in dev
+const distDir   = path.join(__dirname, 'dist');
+const publicDir = path.join(__dirname, 'public');
+const usesDist  = fsSync.existsSync(distDir) && process.env.NODE_ENV !== 'development';
+app.use(express.static(usesDist ? distDir : publicDir));
 
 // Auth routes
 app.get('/api/auth/status', async (_req, res) => {

@@ -4,4 +4,4 @@ mini-react
 .credentials.json
 .env.example
 .jwt_secret
-dist
+tmp
