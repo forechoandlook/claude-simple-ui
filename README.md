@@ -17,10 +17,8 @@ First run creates an account. Token persists 7 days — no repeated login.
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Primary Claude Code config directory |
-| `CLAUDE_CONFIG_DIRS` | — | Extra config dirs, comma-separated (e.g. `~/.claude-personal,~/.claude-work`) |
+| `CLAUDE_CONFIG_DIRS` | `~/.claude` | Claude Code config dirs, comma-separated (e.g. `~/.claude,~/.claude-personal`) |
 | `CLAUDE_CLI_PATH` | `claude` | Path to Claude Code executable |
-| `WORKSPACES_ROOT` | `~/projects` | Default workspace root |
 | `JWT_SECRET` | persisted in `.credentials.json` | Override JWT signing key |
 
 ## Features

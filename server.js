@@ -18,17 +18,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3000');
-const WORKSPACES_ROOT   = process.env.WORKSPACES_ROOT   || path.join(os.homedir(), 'projects');
 const CREDENTIALS_FILE  = process.env.CREDENTIALS_FILE  || path.join(__dirname, '.credentials.json');
 const WORKSPACES_FILE   = process.env.WORKSPACES_FILE   || path.join(__dirname, '.workspaces.json');
 const CLAUDE_CLI_PATH = process.env.CLAUDE_CLI_PATH || 'claude';
-const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-
 // All config dirs to scan — seeded from env, then kept in sync with workspace store
 const CLAUDE_CONFIG_DIRS = (() => {
-  const extra = (process.env.CLAUDE_CONFIG_DIRS || '')
+  const dirs = (process.env.CLAUDE_CONFIG_DIRS || '')
     .split(',').map(s => s.trim().replace(/^~/, os.homedir())).filter(Boolean);
-  return [...new Set([CLAUDE_CONFIG_DIR, ...extra])];
+  return [...new Set(dirs.length ? dirs : [path.join(os.homedir(), '.claude')])];
 })();
 
 // ─── Auth storage (file-based, no SQLite) ────────────────────────────────────
@@ -146,7 +143,7 @@ function safePath(base, rel) {
 }
 
 // Resolve the project root from a request.
-// Accepts ?root=/abs/path (for external projects) or falls back to WORKSPACES_ROOT/:id.
+// Accepts ?root=/abs/path or POST body { root }.
 function expandPath(p) {
   if (!p) return p;
   return p.replace(/^~/, os.homedir());
@@ -160,11 +157,7 @@ function resolveProjectRoot(req) {
       throw new Error('Invalid root path');
     return resolved;
   }
-  return safePath(WORKSPACES_ROOT, req.params.id);
-}
-
-async function ensureWorkspacesRoot() {
-  await fs.mkdir(WORKSPACES_ROOT, { recursive: true });
+  throw new Error('root path required');
 }
 
 // ─── Git helpers ──────────────────────────────────────────────────────────────
@@ -396,7 +389,11 @@ app.post('/api/projects/:id/file', authMiddleware, (req, res) => {
 });
 
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve dist/ in production, public/ in dev
+const staticDir = fsSync.existsSync(path.join(__dirname, 'dist')) && process.env.NODE_ENV !== 'development'
+  ? path.join(__dirname, 'dist')
+  : path.join(__dirname, 'public');
+app.use(express.static(staticDir));
 
 // Auth routes
 app.get('/api/auth/status', async (_req, res) => {
@@ -433,39 +430,6 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Projects routes
-app.get('/api/projects', authMiddleware, async (_req, res) => {
-  try {
-    await ensureWorkspacesRoot();
-    const entries = await fs.readdir(WORKSPACES_ROOT, { withFileTypes: true });
-    const projects = await Promise.all(
-      entries
-        .filter(e => e.isDirectory())
-        .map(async e => {
-          const fullPath = path.join(WORKSPACES_ROOT, e.name);
-          const git = await isGitRepo(fullPath);
-          return { id: e.name, name: e.name, path: fullPath, isGit: git };
-        })
-    );
-    res.json(projects);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/projects', authMiddleware, async (req, res) => {
-  try {
-    const { name } = req.body;
-    if (!name || !/^[a-zA-Z0-9_.-]+$/.test(name))
-      return res.status(400).json({ error: 'Invalid project name (alphanumeric, -, _, . only)' });
-    await ensureWorkspacesRoot();
-    const dir = path.join(WORKSPACES_ROOT, name);
-    await fs.mkdir(dir, { recursive: true });
-    res.json({ id: name, name, path: dir, isGit: false });
-  } catch (e) {
-    if (e.code === 'EEXIST') return res.status(409).json({ error: 'Project already exists' });
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // Files routes
 app.get('/api/projects/:id/files', authMiddleware, async (req, res) => {
@@ -862,12 +826,10 @@ wssShell.on('connection', (ws, req) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 await loadCreds();        // ensures credStore.jwtSecret exists before any request
 await bootstrapEnvUser();
-await ensureWorkspacesRoot();
 await syncConfigDirs(); // load stored workspaces → update CLAUDE_CONFIG_DIRS
 
 server.listen(PORT, () => {
   console.log(`\n  Claude Simple UI running at http://localhost:${PORT}\n`);
-  console.log(`  WORKSPACES_ROOT: ${WORKSPACES_ROOT}`);
   console.log(`  CREDENTIALS_FILE: ${CREDENTIALS_FILE}`);
   if (process.env.AUTH_USERNAME) console.log(`  Auth: env user "${process.env.AUTH_USERNAME}"`);
   console.log();
