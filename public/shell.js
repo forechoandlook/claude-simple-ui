@@ -1,11 +1,13 @@
 // shell.js — HTML templates, layout bootstrap, sidebar, tabs, auth, modals
 import { watch, effect, batch, computed, delegate, esc, $ } from './lib.js';
 import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort,
-         filteredSessions, currentProject, currentTab, filesRoot, gitRoot, ctx } from './state.js';
+         filteredSessions, currentProject, currentTab, filesRoot, gitRoot,
+         currentModel, currentEffort, currentPermission, ctx } from './state.js';
 import { api } from './api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
 import { connectWS, clearMessages, appendMsg, appendSystemMsg, renderToolUse,
-         appendHistoryTokenBar, sendMessage, stopProcessing, newSession } from './chat.js';
+         appendHistoryTokenBar, sendMessage, stopProcessing, attachImage } from './chat.js';
+import { setHash, syncHash } from './router.js';
 import { initSettings, openSettings } from './settings.js';
 
 // ── HTML Templates ────────────────────────────────────────────────────────────
@@ -39,6 +41,7 @@ const AppShell = () => `
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
       <div class="flex gap-2">
         <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ New</button>
+        <button id="btn-theme"        class="btn btn-ghost btn-xs border border-base-300">🌙</button>
         <button id="btn-settings"    class="btn btn-ghost btn-xs border border-base-300">⚙️</button>
         <button id="btn-logout"      class="btn btn-ghost btn-xs border border-base-300">Sign out</button>
       </div>
@@ -81,12 +84,38 @@ const AppShell = () => `
           <div id="tab-chat" class="flex flex-col flex-1 overflow-hidden">
             <div id="messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
             <div id="permission-requests"></div>
-            <div class="flex gap-2 items-end p-3 border-t border-base-300 bg-base-200 flex-shrink-0">
-              <textarea id="chat-input" rows="1" placeholder="Ask Claude… or !cmd for shell"
-                class="textarea textarea-bordered flex-1 text-sm resize-none leading-relaxed"
-                style="min-height:40px;max-height:140px"></textarea>
-              <button id="send-btn" class="btn btn-primary btn-sm" style="height:40px">Send</button>
-              <button id="stop-btn" class="btn btn-error btn-sm hidden" style="height:40px">■</button>
+            <div class="flex flex-col border-t border-base-300 bg-base-200 flex-shrink-0">
+              <div id="chat-opts" class="hidden flex items-center gap-1.5 px-3 pt-2 flex-wrap">
+                <select id="sel-model" class="select select-xs select-bordered font-mono text-xs" title="Model">
+                  <option value="claude-sonnet-4-5">sonnet-4-5</option>
+                  <option value="claude-sonnet-4-6">sonnet-4-6</option>
+                  <option value="claude-opus-4-5">opus-4-5</option>
+                  <option value="claude-haiku-4-5">haiku-4-5</option>
+                </select>
+                <select id="sel-effort" class="select select-xs select-bordered text-xs" title="Effort">
+                  <option value="">effort: off</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="max">max</option>
+                </select>
+                <select id="sel-permission" class="select select-xs select-bordered text-xs" title="Permissions">
+                  <option value="default">perms: default</option>
+                  <option value="acceptEdits">acceptEdits</option>
+                  <option value="auto">auto</option>
+                  <option value="plan">plan</option>
+                  <option value="bypassPermissions">⚠ bypass all</option>
+                </select>
+              </div>
+              <div class="flex gap-2 items-end px-3 pt-2 pb-2">
+                <button id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options" style="height:40px">⚙</button>
+                <textarea id="chat-input" rows="1" placeholder="Ask Claude… (!cmd shell · ⌘↵ send)"
+                  class="textarea textarea-bordered flex-1 text-sm resize-none leading-relaxed"
+                  style="min-height:40px;max-height:140px"></textarea>
+                <button id="send-btn" class="btn btn-primary btn-sm flex-shrink-0" style="height:40px">Send</button>
+                <button id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0" style="height:40px">■</button>
+              </div>
             </div>
           </div>
           <div id="tab-files" class="hidden flex-col flex-1 overflow-hidden">
@@ -125,7 +154,29 @@ const AppShell = () => `
         </div>
       </div>
     </div>
-  </div>`;
+  </div>
+  <dialog id="modal-new-session" class="modal">
+    <div class="modal-box max-w-sm">
+      <h3 class="font-bold text-base mb-4">＋ New Session</h3>
+      <div class="flex flex-col gap-3">
+        <label class="form-control">
+          <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Working Directory</span></div>
+          <input id="new-session-path" type="text" class="input input-bordered input-sm font-mono"
+            placeholder="~/projects/my-app" autocomplete="off">
+        </label>
+        <label class="form-control">
+          <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Workspace</span></div>
+          <select id="new-session-workspace" class="select select-bordered select-sm"></select>
+        </label>
+        <div id="new-session-error" class="alert alert-error text-xs py-2 hidden"></div>
+      </div>
+      <div class="modal-action">
+        <button id="new-session-cancel" class="btn btn-ghost btn-sm">Cancel</button>
+        <button id="new-session-start"  class="btn btn-primary btn-sm">Start</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+  </dialog>`;
 
 // ── Sessions + Workspaces ─────────────────────────────────────────────────────
 export async function loadAllSessions() {
@@ -247,6 +298,7 @@ export async function resumeSession(sid, cwd, configDir) {
     $('messages').innerHTML = '';
     appendSystemMsg(`Session ${sid.slice(0,8)}… (history unavailable: ${e.message})`);
   }
+  syncHash();
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -325,8 +377,77 @@ function initSidebarResize() {
   });
 }
 
+// ── Theme ─────────────────────────────────────────────────────────────────────
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('theme', theme);
+  const btn = $('btn-theme');
+  if (btn) btn.textContent = theme === 'dark' ? '🌙' : '☀️';
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  applyTheme(cur === 'dark' ? 'light' : 'dark');
+}
+
+// ── New Session modal ─────────────────────────────────────────────────────────
+function openNewSessionModal() {
+  const sel = $('new-session-workspace');
+  if (sel) {
+    const wss = workspacesData.peek();
+    sel.innerHTML = wss.map(w =>
+      `<option value="${esc(w.configDir)}">${esc(w.name)} — ${esc(w.configDir)}</option>`
+    ).join('');
+    // pre-select current session's workspace
+    if (ctx.configDir) sel.value = ctx.configDir;
+  }
+  $('new-session-path').value = currentProject.peek()?.path || '';
+  $('new-session-error').classList.add('hidden');
+  $('modal-new-session').showModal();
+  setTimeout(() => $('new-session-path').focus(), 50);
+}
+
+async function startNewSession() {
+  const rawPath  = $('new-session-path').value.trim();
+  const configDir = $('new-session-workspace').value;
+  const errEl    = $('new-session-error');
+  errEl.classList.add('hidden');
+
+  if (!rawPath) { errEl.textContent = 'Working directory is required'; errEl.classList.remove('hidden'); return; }
+
+  try {
+    const result = await api('POST', '/api/resolve-path', { path: rawPath });
+    if (!result.isDir) throw new Error('Path is not a directory');
+
+    $('modal-new-session').close();
+
+    const name = result.path.split('/').filter(Boolean).pop() || result.path;
+    ctx.sessionId = null;
+    ctx.configDir = configDir || null;
+    batch(() => {
+      currentProject.value = { id: name, name, path: result.path };
+      sessionFilter.value  = result.path;
+    });
+    $('topbar-project').textContent = result.path;
+    $('welcome').classList.add('hidden');
+    const pv = $('project-view');
+    pv.classList.remove('hidden');
+    pv.style.display = 'flex';
+    clearMessages();
+    connectWS();
+    switchTab('chat');
+    appendSystemMsg(`New session · ${result.path}`);
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+}
+
 // ── Init — render HTML, wire everything up ────────────────────────────────────
 export function initShell() {
+  // 0. Restore saved theme
+  applyTheme(localStorage.getItem('theme') || 'dark');
+
   // 1. Render into #root (ensure it fills viewport)
   const root = document.getElementById('root');
   root.style.cssText = 'display:flex;flex-direction:column;flex:1;height:100%';
@@ -387,6 +508,13 @@ export function initShell() {
   // 6. Listen for new sessions from WS
   document.addEventListener('sessions-changed', loadAllSessions);
 
+  // 7. Router: deep-link to a session by id
+  document.addEventListener('router:session', async ({ detail: { id, tab } }) => {
+    const s = sessionsData.peek().find(s => s.sessionId === id);
+    await resumeSession(id, s?.cwd || null, s?.configDir || null);
+    if (tab && ['chat','files','git','shell'].includes(tab)) switchTab(tab);
+  });
+
   // 7. Event delegation
   delegate.on('click', '#auth-btn', submitAuth);
   delegate.on('keydown', '#auth-username, #auth-password', e => { if (e.key === 'Enter') submitAuth(); });
@@ -401,6 +529,7 @@ export function initShell() {
   delegate.on('click', '#session-filter-badge', () => { sessionFilter.value = null; });
   delegate.on('click', '[data-ws-tab]', (_, el) => { sessionFilter.value = el.dataset.wsTab || null; });
   delegate.on('click', '#btn-settings', openSettings);
+  delegate.on('click', '#btn-theme', toggleTheme);
 
   delegate.on('click', '[data-session-id]', (e, el) => {
     resumeSession(el.dataset.sessionId, el.dataset.sessionCwd || null, el.dataset.sessionConfigDir || null);
@@ -428,7 +557,20 @@ export function initShell() {
   delegate.on('click', '#git-root-btn',   () => applyRoot('git-root-input',   gitRoot));
   delegate.on('keydown', '#files-root-input', e => { if (e.key === 'Enter') applyRoot('files-root-input', filesRoot); });
   delegate.on('keydown', '#git-root-input',   e => { if (e.key === 'Enter') applyRoot('git-root-input',   gitRoot); });
-  delegate.on('click', '#btn-new-session, #btn-new-session-welcome', newSession);
+  // Options toggle
+  delegate.on('click', '#btn-opts', () => {
+    $('chat-opts').classList.toggle('hidden');
+  });
+
+  // Model / effort / permission selectors
+  delegate.on('change', '#sel-model',      (_, el) => { currentModel.value      = el.value; });
+  delegate.on('change', '#sel-effort',     (_, el) => { currentEffort.value     = el.value; });
+  delegate.on('change', '#sel-permission', (_, el) => { currentPermission.value = el.value; });
+
+  delegate.on('click', '#btn-new-session, #btn-new-session-welcome', openNewSessionModal);
+  delegate.on('click', '#new-session-cancel', () => $('modal-new-session').close());
+  delegate.on('click', '#new-session-start',  startNewSession);
+  delegate.on('keydown', '#new-session-path', e => { if (e.key === 'Enter') startNewSession(); });
   delegate.on('click', '#send-btn',        sendMessage);
   delegate.on('click', '#stop-btn',        stopProcessing);
   delegate.on('click', '#btn-logout',      () => { ctx.token = null; localStorage.removeItem('token'); location.reload(); });

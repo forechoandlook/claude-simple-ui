@@ -311,10 +311,14 @@ function mapOptions(options = {}) {
     settingSources: ['project', 'user', 'local'],
     model: options.model || 'claude-sonnet-4-5',
   };
-  if (options.cwd) opts.cwd = options.cwd;
+  if (options.cwd)       opts.cwd    = options.cwd;
   if (options.sessionId) opts.resume = options.sessionId;
+  if (options.effort)    opts.effort = options.effort;
   if (options.permissionMode && options.permissionMode !== 'default') {
     opts.permissionMode = options.permissionMode;
+  }
+  if (options.allowDangerouslySkipPermissions) {
+    opts.allowDangerouslySkipPermissions = true;
   }
   if (options.allowedTools?.length) opts.allowedTools = options.allowedTools;
   return opts;
@@ -368,6 +372,23 @@ function abortSession(sessionId) {
 
 // ─── Express app ──────────────────────────────────────────────────────────────
 const app = express();
+// Image upload → save to OS tmp, return path for Claude to read
+app.post('/api/upload-image', authMiddleware, (req, res) => {
+  (async () => {
+    const ext  = (req.headers['x-filename'] || 'image.png').split('.').pop().replace(/[^a-z0-9]/gi, '') || 'png';
+    const name = `claude-upload-${Date.now()}.${ext}`;
+    const dest = path.join(os.tmpdir(), name);
+    const writer = fsSync.createWriteStream(dest);
+    req.pipe(writer);
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+      req.on('error', reject);
+    });
+    res.json({ path: dest });
+  })().catch(e => res.status(500).json({ error: e.message }));
+});
+
 // File upload route must be registered BEFORE express.json() to get raw stream
 app.post('/api/projects/:id/file', authMiddleware, (req, res) => {
   (async () => {

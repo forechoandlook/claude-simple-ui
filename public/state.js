@@ -9,6 +9,9 @@ export const sessionSort    = signal('time'); // 'time' | 'project'
 export const currentProject = signal(null);   // { id, name, path } | null
 export const currentTab     = signal('chat');
 export const isProcessing   = signal(false);
+export const currentModel      = signal('claude-sonnet-4-5');
+export const currentEffort     = signal('');
+export const currentPermission = signal('default'); // 'default'|'acceptEdits'|'bypassPermissions'|'plan'|'auto'
 export const filesRoot      = signal(''); // custom root override for Files tab
 export const gitRoot        = signal(''); // custom root override for Git tab
 

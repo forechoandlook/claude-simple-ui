@@ -1,6 +1,6 @@
 // chat.js — WebSocket, message rendering, send actions
 import { watch, delegate, esc, $ } from './lib.js';
-import { ctx, isProcessing, currentProject, currentTab } from './state.js';
+import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEffort, currentPermission } from './state.js';
 import { sendWs } from './api.js';
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -58,6 +58,57 @@ function handleWsMessage(msg) {
     renderPermissionRequest(msg);
 }
 
+// ── Slash commands (client-side) ──────────────────────────────────────────────
+const MODEL_ALIASES = {
+  'haiku':   'claude-haiku-4-5',
+  'sonnet':  'claude-sonnet-4-6',
+  'opus':    'claude-opus-4-5',
+  'sonnet4': 'claude-sonnet-4-6',
+  'haiku4':  'claude-haiku-4-5',
+};
+
+// Returns true if handled, false if should be sent to model
+function handleSlashCommand(text) {
+  const [cmd, ...args] = text.slice(1).trim().split(/\s+/);
+  const arg = args.join(' ');
+
+  switch (cmd.toLowerCase()) {
+    case 'model': {
+      if (!arg) {
+        appendSystemMsg(`Current model: ${currentModel.peek()}`);
+        return true;
+      }
+      const resolved = MODEL_ALIASES[arg.toLowerCase()] || arg;
+      currentModel.value = resolved;
+      appendSystemMsg(`Model set to ${resolved}`);
+      return true;
+    }
+    case 'effort': {
+      const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
+      if (!arg) {
+        appendSystemMsg(`Current effort: ${currentEffort.peek() || '(default)'} · levels: ${levels.join(' | ')}`);
+        return true;
+      }
+      if (!levels.includes(arg.toLowerCase())) {
+        appendSystemMsg(`Unknown effort level "${arg}" · valid: ${levels.join(' | ')}`);
+        return true;
+      }
+      currentEffort.value = arg.toLowerCase();
+      appendSystemMsg(`Effort set to ${arg.toLowerCase()}`);
+      return true;
+    }
+    case 'clear':
+      clearMessages();
+      ctx.sessionId = null;
+      appendSystemMsg('Cleared · new session');
+      return true;
+    default: {
+      appendSystemMsg(`Available slash commands:\n  /model [haiku|sonnet|opus|<model-id>]\n  /effort [low|medium|high|xhigh|max]\n  /clear\n\nOther Claude Code slash commands require the CLI.`);
+      return true;
+    }
+  }
+}
+
 // ── Send / control ────────────────────────────────────────────────────────────
 export function sendMessage() {
   const input = $('chat-input');
@@ -66,13 +117,29 @@ export function sendMessage() {
   input.value = '';
   autoResize(input);
   updateInputMode('');
+
+  if (text.startsWith('/')) {
+    handleSlashCommand(text);
+    return;
+  }
+
   isProcessing.value = true;
   if (text.startsWith('!')) {
     appendMsg('shell', '$ Shell', text.slice(1).trim());
     sendWs({ type: 'shell-command', command: text.slice(1).trim(), cwd: currentProject.peek().path });
   } else {
     appendMsg('user', 'You', text);
-    sendWs({ type: 'claude-command', command: text, options: { cwd: currentProject.peek().path, sessionId: ctx.sessionId, configDir: ctx.configDir } });
+    const effort     = currentEffort.peek();
+    const permission = currentPermission.peek();
+    sendWs({ type: 'claude-command', command: text, options: {
+      cwd:       currentProject.peek().path,
+      sessionId: ctx.sessionId,
+      configDir: ctx.configDir,
+      model:     currentModel.peek(),
+      ...(effort     && { effort }),
+      ...(permission && permission !== 'default' && { permissionMode: permission }),
+      ...(permission === 'bypassPermissions' && { allowDangerouslySkipPermissions: true }),
+    }});
   }
 }
 
@@ -113,9 +180,14 @@ function bubbleHtml(role, text) {
   const expandBtn = `<button class="msg-expand-btn text-[10px] text-primary/70 mt-1.5 block cursor-pointer hover:text-primary">▼ Show more</button>`;
   switch (role) {
     case 'user': {
-      const long = text.length > USER_COLLAPSE;
-      const inner = long ? `<div class="msg-body">${esc(text.trimEnd())}</div>${expandBtn}` : esc(text.trimEnd());
-      return `<div class="flex justify-end px-2"><div class="max-w-[80%] rounded-2xl rounded-tr-sm px-3 py-2 text-sm bg-primary/15 border border-primary/20 text-base-content break-words${long ? ' msg-card' : ''}" style="white-space:pre-wrap">${inner}</div></div>`;
+      const hasImage = /!\[.*?\]\(.*?\)/.test(text);
+      const rendered = hasImage ? renderMarkdown(text) : null;
+      const long  = text.length > USER_COLLAPSE;
+      const inner = long
+        ? `<div class="msg-body">${rendered ?? esc(text.trimEnd())}</div>${expandBtn}`
+        : (rendered ?? esc(text.trimEnd()));
+      const style = rendered ? '' : ' style="white-space:pre-wrap"';
+      return `<div class="flex justify-end px-2"><div class="max-w-[80%] rounded-2xl rounded-tr-sm px-3 py-2 text-sm bg-primary/15 border border-primary/20 text-base-content break-words${long ? ' msg-card' : ''}${rendered ? ' md' : ''}"${style}>${inner}</div></div>`;
     }
     case 'assistant': {
       const long = text.length > ASST_COLLAPSE;
@@ -144,6 +216,76 @@ export function appendMsg(role, _label, text) {
 }
 
 export function appendSystemMsg(text) { appendMsg('system', '', text); }
+
+async function uploadImageBlob(blob, filename) {
+  const res = await fetch('/api/upload-image', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${ctx.token}`, 'x-filename': filename },
+    body: blob,
+  });
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+  return (await res.json()).path;
+}
+
+function insertAtCursor(ta, text) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  ta.value = ta.value.slice(0, s) + text + ta.value.slice(e);
+  ta.selectionStart = ta.selectionEnd = s + text.length;
+  ta.dispatchEvent(new Event('input'));
+}
+
+export function initImagePaste() {
+  document.addEventListener('paste', async e => {
+    const ta = $('chat-input');
+    if (!ta || document.activeElement !== ta) return;
+    const items = [...(e.clipboardData?.items || [])];
+    const imageItem = items.find(i => i.type.startsWith('image/'));
+    if (!imageItem) return;
+    e.preventDefault();
+    const blob = imageItem.getAsFile();
+    const ext  = imageItem.type.split('/')[1] || 'png';
+    const name = `paste-${Date.now()}.${ext}`;
+    ta.disabled = true;
+    try {
+      const path = await uploadImageBlob(blob, name);
+      insertAtCursor(ta, `![${name}](${path})`);
+    } catch (err) {
+      appendSystemMsg(`Image paste failed: ${err.message}`);
+    } finally {
+      ta.disabled = false;
+      ta.focus();
+    }
+  });
+}
+
+export function attachImage() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.multiple = true;
+  input.addEventListener('change', async () => {
+    for (const file of input.files) {
+      appendSystemMsg(`Uploading ${file.name}…`);
+      try {
+        const res = await fetch('/api/upload-image', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${ctx.token}`, 'x-filename': file.name },
+          body: file,
+        });
+        const { path } = await res.json();
+        // Insert path reference into chat input
+        const ta = $('chat-input');
+        if (ta) {
+          ta.value += (ta.value ? '\n' : '') + path;
+          ta.dispatchEvent(new Event('input'));
+          ta.focus();
+        }
+        appendSystemMsg(`📎 ${path}`);
+      } catch (e) { appendSystemMsg(`Upload failed: ${e.message}`); }
+    }
+  });
+  input.click();
+}
 
 function fmtNum(n) { return n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
 
@@ -253,7 +395,10 @@ export function initChat() {
   });
 
   // Chat input: Enter = send, auto-resize, shell mode styling
-  delegate.on('keydown', '#chat-input', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+  delegate.on('keydown', '#chat-input', e => {
+    const send = e.key === 'Enter' && (e.metaKey || e.ctrlKey);
+    if (send) { e.preventDefault(); sendMessage(); }
+  });
   delegate.on('input',   '#chat-input', (e, el) => { autoResize(el); updateInputMode(el.value); });
 
   // Permission buttons
