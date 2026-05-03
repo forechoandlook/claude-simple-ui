@@ -21,6 +21,18 @@ function handleWsMessage(msg) {
     document.dispatchEvent(new CustomEvent('sessions-changed'));
     return;
   }
+  if (msg.type === 'result') {
+    isProcessing.value = false;
+    const u = msg.usage;
+    if (u) {
+      const cache  = u.cacheReadInputTokens  ? ` · ${fmtNum(u.cacheReadInputTokens)} cached` : '';
+      const create = u.cacheCreationInputTokens ? ` · ${fmtNum(u.cacheCreationInputTokens)} cache-write` : '';
+      const cost   = u.costUSD != null ? ` · $${u.costUSD.toFixed(4)}` : '';
+      appendTokenBar(`↑${fmtNum(u.inputTokens)} ↓${fmtNum(u.outputTokens)}${cache}${create}${cost}`);
+    }
+    if (!msg.is_error) appendSystemMsg('✓ Done');
+    return;
+  }
   if (msg.type === 'complete')    { isProcessing.value = false; if (!msg.aborted) appendSystemMsg('✓ Done'); return; }
   if (msg.type === 'error')       { appendMsg('error', 'Error', msg.message); isProcessing.value = false; return; }
   if (msg.type === 'shell-start') { ctx.shellBubble = null; return; }
@@ -60,7 +72,7 @@ export function sendMessage() {
     sendWs({ type: 'shell-command', command: text.slice(1).trim(), cwd: currentProject.peek().path });
   } else {
     appendMsg('user', 'You', text);
-    sendWs({ type: 'claude-command', command: text, options: { cwd: currentProject.peek().path, sessionId: ctx.sessionId } });
+    sendWs({ type: 'claude-command', command: text, options: { cwd: currentProject.peek().path, sessionId: ctx.sessionId, configDir: ctx.configDir } });
   }
 }
 
@@ -94,29 +106,64 @@ function autoResize(el) {
 }
 
 // ── Message rendering ─────────────────────────────────────────────────────────
-const MSG_CLS = {
-  user:        'bg-primary/10 border border-primary/20',
-  assistant:   'bg-base-300',
-  shell:       'bg-[#0d1117] border border-base-300 font-mono text-[#c9d1d9]',
-  'shell-err': 'bg-[#0d1117] border border-base-300 font-mono text-error',
-  error:       'bg-error/8 border border-error/20 text-error',
-  system:      '!bg-transparent !border-0 !px-0 !py-0.5 text-base-content/40',
-};
+const USER_COLLAPSE = 200;
+const ASST_COLLAPSE = 500;
 
-export function appendMsg(role, label, text) {
+function bubbleHtml(role, text) {
+  const expandBtn = `<button class="msg-expand-btn text-[10px] text-primary/70 mt-1.5 block cursor-pointer hover:text-primary">▼ Show more</button>`;
+  switch (role) {
+    case 'user': {
+      const long = text.length > USER_COLLAPSE;
+      const inner = long ? `<div class="msg-body">${esc(text.trimEnd())}</div>${expandBtn}` : esc(text.trimEnd());
+      return `<div class="flex justify-end px-2"><div class="max-w-[80%] rounded-2xl rounded-tr-sm px-3 py-2 text-sm bg-primary/15 border border-primary/20 text-base-content break-words${long ? ' msg-card' : ''}" style="white-space:pre-wrap">${inner}</div></div>`;
+    }
+    case 'assistant': {
+      const long = text.length > ASST_COLLAPSE;
+      const inner = long ? `<div class="msg-body">${renderMarkdown(text)}</div>${expandBtn}` : renderMarkdown(text);
+      return `<div class="flex justify-start px-2"><div class="max-w-[88%] rounded-2xl rounded-tl-sm px-3 py-2 text-sm bg-base-200 break-words md${long ? ' msg-card' : ''}">${inner}</div></div>`;
+    }
+    case 'error':
+      return `<div class="flex justify-start px-2">
+        <div class="max-w-[88%] rounded-2xl rounded-tl-sm px-3 py-2 text-sm bg-error/10 border border-error/20 text-error break-words" style="white-space:pre-wrap">${esc(text)}</div>
+      </div>`;
+    case 'shell':
+    case 'shell-err':
+      return `<div class="mx-2 rounded-lg bg-[#0d1117] border border-base-300 px-3 py-2 text-sm font-mono ${role === 'shell-err' ? 'text-error' : 'text-[#c9d1d9]'} break-words" style="white-space:pre-wrap">${esc(text)}</div>`;
+    case 'system':
+      return `<div class="text-center text-[11px] text-base-content/30 py-0.5 select-none">${esc(text)}</div>`;
+    default:
+      return `<div class="mx-2 rounded-lg px-3 py-2 text-sm bg-base-300 break-words" style="white-space:pre-wrap">${esc(text)}</div>`;
+  }
+}
+
+export function appendMsg(role, _label, text) {
   const msgs = $('messages');
   if (!msgs) return;
-  const labelHtml = role !== 'system'
-    ? `<div class="text-[10px] uppercase tracking-wider text-base-content/40">${esc(label || role)}</div>` : '';
-  const cls = `rounded-lg px-3 py-2 text-sm leading-relaxed break-words ${MSG_CLS[role] || 'bg-base-300'}`;
-  const body = role === 'assistant'
-    ? `<div class="${cls} md">${renderMarkdown(text)}</div>`
-    : `<div class="${cls}" style="white-space:pre-wrap">${esc(text)}</div>`;
-  msgs.insertAdjacentHTML('beforeend', `<div class="flex flex-col gap-1">${labelHtml}${body}</div>`);
+  msgs.insertAdjacentHTML('beforeend', bubbleHtml(role, text));
   msgs.scrollTop = msgs.scrollHeight;
 }
 
 export function appendSystemMsg(text) { appendMsg('system', '', text); }
+
+function fmtNum(n) { return n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
+
+function appendTokenBar(text) {
+  const msgs = $('messages');
+  if (!msgs) return;
+  msgs.insertAdjacentHTML('beforeend',
+    `<div class="flex items-center gap-1.5 px-1 py-0.5 text-[10px] font-mono text-base-content/30 select-none">
+       <span class="text-base-content/20">◈</span>${esc(text)}
+     </div>`);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+// Called when loading history from JSONL (usage keys use snake_case from file)
+export function appendHistoryTokenBar(u) {
+  if (!u) return;
+  const cache  = u.cache_read_input_tokens   ? ` · ${fmtNum(u.cache_read_input_tokens)} cached` : '';
+  const create = u.cache_creation_input_tokens ? ` · ${fmtNum(u.cache_creation_input_tokens)} cache-write` : '';
+  appendTokenBar(`↑${fmtNum(u.input_tokens || 0)} ↓${fmtNum(u.output_tokens || 0)}${cache}${create}`);
+}
 
 export function clearMessages() {
   const msgs = $('messages'), perms = $('permission-requests');
@@ -128,12 +175,13 @@ export function clearMessages() {
 function appendStreamBubble(role) {
   const msgs = $('messages');
   if (!msgs) return null;
-  msgs.insertAdjacentHTML('beforeend', `<div class="flex flex-col gap-1">
-    <div class="text-[10px] uppercase tracking-wider text-base-content/40">${role === 'shell-err' ? 'stderr' : 'stdout'}</div>
-    <div class="rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words ${MSG_CLS[role] || 'bg-base-300'}"></div>
-  </div>`);
+  const cls = role === 'shell-err'
+    ? 'text-error'
+    : 'text-[#c9d1d9]';
+  msgs.insertAdjacentHTML('beforeend',
+    `<div class="mx-2 rounded-lg bg-[#0d1117] border border-base-300 px-3 py-2 text-sm font-mono ${cls} whitespace-pre-wrap break-words"></div>`);
   msgs.scrollTop = msgs.scrollHeight;
-  return msgs.lastElementChild.querySelector('div:last-child');
+  return msgs.lastElementChild;
 }
 
 function appendToStreamBubble(el, text) {
@@ -148,15 +196,15 @@ export function renderToolUse(block) {
   const inputStr = typeof block.input === 'object' ? JSON.stringify(block.input, null, 2) : String(block.input || '');
   const first    = typeof block.input === 'object' ? Object.values(block.input).find(v => typeof v === 'string' && v.trim()) : inputStr;
   const preview  = (first || '').replace(/\n/g, ' ').slice(0, 80);
-  msgs.insertAdjacentHTML('beforeend', `<div class="flex flex-col gap-1">
-    <div class="rounded-lg border border-success/15 bg-success/5 px-3 py-2 tool-card cursor-pointer select-none">
-      <div class="flex items-center gap-2 text-xs font-mono">
+  msgs.insertAdjacentHTML('beforeend', `<div class="flex flex-col">
+    <div class="rounded border border-success/15 bg-success/5 px-2 py-1 tool-card cursor-pointer select-none">
+      <div class="flex items-center gap-1.5 text-xs font-mono">
         <span class="text-warning">⚡</span>
         <span class="text-warning font-semibold">${esc(block.name)}</span>
         <span class="text-base-content/50 truncate flex-1">${esc(preview)}</span>
         <span class="tool-chevron text-[10px] text-base-content/40">▶</span>
       </div>
-      <div class="tool-detail mt-2 p-2 bg-[#0d1117] rounded border border-base-300
+      <div class="tool-detail mt-1 p-2 bg-[#0d1117] rounded border border-base-300
                   font-mono text-[11px] text-[#c9d1d9] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto">${esc(inputStr)}</div>
     </div>
   </div>`);
@@ -199,7 +247,7 @@ export function initChat() {
     const existing = $('typing-indicator');
     if (val && !existing) {
       msgs.insertAdjacentHTML('beforeend',
-        '<div id="typing-indicator" class="flex items-center gap-2 text-xs text-base-content/40 px-1 py-1"><span class="dot"></span><span class="dot"></span><span class="dot"></span> Processing…</div>');
+        '<div id="typing-indicator" class="flex justify-start px-2"><div class="flex items-center gap-1.5 rounded-2xl rounded-tl-sm px-3 py-2 bg-base-200 text-xs text-base-content/40"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div></div>');
       msgs.scrollTop = msgs.scrollHeight;
     } else if (!val) existing?.remove();
   });
@@ -218,5 +266,13 @@ export function initChat() {
   delegate.on('click', '.tool-card', (e, el) => {
     el.classList.toggle('open');
     $('messages')?.scrollTo({ top: 999999 });
+  });
+
+  // Long message expand/collapse
+  delegate.on('click', '.msg-expand-btn', (e, el) => {
+    e.stopPropagation();
+    const card = el.closest('.msg-card');
+    const expanded = card.classList.toggle('open');
+    el.textContent = expanded ? '▲ Show less' : '▼ Show more';
   });
 }

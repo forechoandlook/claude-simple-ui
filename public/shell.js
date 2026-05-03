@@ -1,14 +1,16 @@
 // shell.js — HTML templates, layout bootstrap, sidebar, tabs, auth, modals
-import { watch, batch, computed, delegate, keyedList, defineComponent, esc, $ } from './lib.js';
-import { projectsData, sessionsData, sessionFilter, filteredSessions,
-         currentProject, currentTab, ctx } from './state.js';
+import { watch, effect, batch, computed, delegate, esc, $ } from './lib.js';
+import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort,
+         filteredSessions, currentProject, currentTab, filesRoot, gitRoot, ctx } from './state.js';
 import { api } from './api.js';
+import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
 import { connectWS, clearMessages, appendMsg, appendSystemMsg, renderToolUse,
-         sendMessage, stopProcessing, newSession } from './chat.js';
+         appendHistoryTokenBar, sendMessage, stopProcessing, newSession } from './chat.js';
+import { initSettings, openSettings } from './settings.js';
 
 // ── HTML Templates ────────────────────────────────────────────────────────────
 const AuthScreen = () => `
-  <div id="auth-screen" class="flex items-center justify-center h-dvh p-4">
+  <div id="auth-screen" class="flex items-center justify-center h-full p-4">
     <div class="card bg-base-200 border border-base-300 w-full max-w-sm shadow-xl">
       <div class="card-body gap-3 p-8">
         <h1 class="text-xl font-bold">🤖 Claude Code</h1>
@@ -34,40 +36,47 @@ const AppShell = () => `
       <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
       <span class="font-semibold text-sm hidden sm:inline">🤖 Claude Code</span>
       <span class="text-base-300 hidden sm:inline">/</span>
-      <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a project</span>
+      <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
       <div class="flex gap-2">
-        <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ Session</button>
+        <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ New</button>
+        <button id="btn-settings"    class="btn btn-ghost btn-xs border border-base-300">⚙️</button>
         <button id="btn-logout"      class="btn btn-ghost btn-xs border border-base-300">Sign out</button>
       </div>
     </div>
     <div class="flex flex-1 overflow-hidden relative">
-      <div id="sidebar" class="w-64 bg-base-200 border-r border-base-300 flex flex-col flex-shrink-0 overflow-hidden">
-        <div class="flex flex-col overflow-hidden" style="max-height:50%;min-height:120px">
-          <div class="flex items-center justify-between px-3 py-2 border-b border-base-300">
-            <span class="text-xs uppercase tracking-wider text-base-content/50 font-medium">Projects</span>
-            <button id="btn-new-project" class="btn btn-ghost btn-xs">＋</button>
-          </div>
-          <div id="project-list" class="overflow-y-auto flex-1"></div>
-        </div>
-        <div class="flex flex-col flex-1 overflow-hidden border-t border-base-300">
-          <div class="flex items-center justify-between px-3 py-2 border-b border-base-300">
-            <span class="text-xs uppercase tracking-wider text-base-content/50 font-medium">Sessions</span>
+      <div id="sidebar" class="bg-base-200 border-r border-base-300 flex flex-col flex-shrink-0 overflow-hidden" style="width:260px;min-width:160px;max-width:480px">
+        <div class="flex items-center justify-between px-3 py-2 border-b border-base-300 flex-shrink-0">
+          <span class="text-xs uppercase tracking-wider text-base-content/50 font-medium">Sessions</span>
+          <div class="flex items-center gap-1">
             <span id="session-filter-badge" class="hidden text-[10px] text-primary cursor-pointer">× filter</span>
+            <button id="session-sort-btn" class="btn btn-ghost btn-xs px-1 text-[10px] text-base-content/40" title="Sort">⇅ time</button>
           </div>
-          <div id="session-list" class="overflow-y-auto flex-1"></div>
         </div>
+        <div id="ws-tabs" class="flex overflow-x-auto border-b border-base-300 flex-shrink-0" style="scrollbar-width:none"></div>
+        <div class="px-2 py-1.5 border-b border-base-300 flex-shrink-0">
+          <input id="session-search" type="text" placeholder="Search path or name…"
+            class="input input-xs input-bordered w-full text-xs" autocomplete="off">
+        </div>
+        <div id="session-list" class="overflow-y-auto flex-1"></div>
+      </div>
+      <div class="flex flex-col flex-shrink-0 relative" style="width:12px">
+        <div id="sidebar-resize" class="absolute inset-0 bg-transparent hover:bg-primary/30 transition-colors cursor-col-resize"></div>
+        <button id="sidebar-toggle" title="Toggle sidebar"
+          class="absolute z-10 flex items-center justify-center w-5 h-8 bg-base-200 border border-base-300 rounded-r-md text-[10px] text-base-content/40 hover:text-base-content cursor-pointer"
+          style="left:0;top:50%;transform:translateY(-50%)">◀</button>
       </div>
       <div id="main" class="flex-1 flex flex-col overflow-hidden min-w-0">
         <div id="welcome" class="flex-1 flex flex-col items-center justify-center gap-3 text-base-content/50 p-6 text-center">
           <h2 class="text-lg font-semibold text-base-content">Welcome to Claude Code</h2>
-          <p class="text-sm">Select or create a project to start</p>
-          <button id="btn-new-project-welcome" class="btn btn-primary btn-sm mt-2">Create Project</button>
+          <p class="text-sm">Select a session or start a new one</p>
+          <button id="btn-new-session-welcome" class="btn btn-primary btn-sm mt-2">＋ New Session</button>
         </div>
         <div id="project-view" class="hidden flex-col flex-1 overflow-hidden">
           <div class="flex bg-base-200 border-b border-base-300 flex-shrink-0 overflow-x-auto" style="scrollbar-width:none">
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-primary border-primary"            data-tab="chat">Chat</button>
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="files">Files</button>
-            <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="git">Source Control</button>
+            <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="git">Git</button>
+            <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="shell">Shell</button>
           </div>
           <div id="tab-chat" class="flex flex-col flex-1 overflow-hidden">
             <div id="messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
@@ -81,66 +90,112 @@ const AppShell = () => `
             </div>
           </div>
           <div id="tab-files" class="hidden flex-col flex-1 overflow-hidden">
+            <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
+              <span class="text-xs text-base-content/40 flex-shrink-0">Root</span>
+              <input id="files-root-input" type="text" placeholder="Project path (leave blank for session cwd)"
+                class="input input-xs flex-1 font-mono text-xs bg-transparent border-0 focus:outline-none px-1" autocomplete="off">
+              <button id="files-root-btn" class="btn btn-ghost btn-xs text-xs">Go</button>
+            </div>
             <div id="files-breadcrumb" class="flex items-center flex-wrap gap-1 px-4 py-2 border-b border-base-300 text-xs text-base-content/60 flex-shrink-0"></div>
             <div id="files-area" class="flex-1 overflow-y-auto"></div>
           </div>
+          <div id="tab-shell" class="hidden flex-col flex-1 overflow-hidden bg-[#0d1117]">
+            <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 bg-base-200 flex-shrink-0">
+              <span class="text-xs text-base-content/40 font-mono flex-1" id="term-cwd"></span>
+              <button id="term-clear"     class="btn btn-ghost btn-xs text-xs text-base-content/40">Clear</button>
+              <button id="term-reconnect" class="btn btn-ghost btn-xs text-xs text-base-content/40">Reconnect</button>
+            </div>
+            <div id="term-output" class="flex-1 overflow-y-auto p-3 font-mono text-xs text-[#c9d1d9] whitespace-pre-wrap break-all cursor-text leading-relaxed"></div>
+            <div class="flex items-center gap-2 px-3 py-2 border-t border-base-300 bg-base-200 flex-shrink-0">
+              <span class="text-[#4e9a06] font-mono text-xs select-none">$</span>
+              <input id="term-input" type="text" autocomplete="off" spellcheck="false"
+                class="flex-1 bg-transparent font-mono text-xs text-[#c9d1d9] outline-none border-0"
+                placeholder="type a command…">
+            </div>
+          </div>
           <div id="tab-git" class="hidden flex-col flex-1 overflow-hidden">
+            <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
+              <span class="text-xs text-base-content/40 flex-shrink-0">Root</span>
+              <input id="git-root-input" type="text" placeholder="Project path (leave blank for session cwd)"
+                class="input input-xs flex-1 font-mono text-xs bg-transparent border-0 focus:outline-none px-1" autocomplete="off">
+              <button id="git-root-btn" class="btn btn-ghost btn-xs text-xs">Go</button>
+            </div>
             <div id="git-area" class="flex-1 overflow-y-auto"></div>
           </div>
         </div>
       </div>
     </div>
-  </div>
-  <dialog id="modal-new-project" class="modal">
-    <div class="modal-box max-w-sm">
-      <h3 class="font-bold text-base mb-4">Create New Project</h3>
-      <label class="form-control mb-3">
-        <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Folder Name</span></div>
-        <input id="new-project-name" type="text" class="input input-bordered input-sm" placeholder="my-project" autocomplete="off">
-      </label>
-      <div id="new-project-error" class="alert alert-error text-xs py-2 hidden mb-3"></div>
-      <div class="modal-action">
-        <button id="modal-cancel" class="btn btn-ghost btn-sm">Cancel</button>
-        <button id="modal-create" class="btn btn-primary btn-sm">Create</button>
-      </div>
-    </div>
-    <form method="dialog" class="modal-backdrop"><button>close</button></form>
-  </dialog>`;
+  </div>`;
 
-const ProjectItem = defineComponent(({ p, active }) => `
-  <div class="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-base-300 ${active ? 'bg-primary/10' : ''}"
-       data-project-id="${esc(p.id)}" data-project-path="${esc(p.path)}" data-project-name="${esc(p.name)}">
-    <span class="text-base-content/40 flex-shrink-0 text-sm">📁</span>
-    <span class="text-sm flex-1 truncate ${active ? 'text-primary font-medium' : ''}">${esc(p.name)}</span>
-    ${p.isGit ? '<span class="badge badge-success badge-xs">git</span>' : ''}
-  </div>`);
+// ── Sessions + Workspaces ─────────────────────────────────────────────────────
+export async function loadAllSessions() {
+  // 1. Show cached data immediately if available
+  const cached = await getCachedSessions();
+  if (cached) sessionsData.value = cached;
 
-const SessionItem = defineComponent(({ s, active, showProject }) => `
-  <div class="flex items-start gap-2 px-3 py-1.5 cursor-pointer border-l-2 hover:bg-base-300
-              ${active ? 'border-primary bg-primary/5' : 'border-transparent'}"
-       data-session-id="${esc(s.sessionId)}" data-session-cwd="${esc(s.cwd || '')}">
-    <span class="text-base-content/40 text-sm flex-shrink-0 mt-0.5">💬</span>
-    <div class="flex-1 min-w-0">
-      <div class="text-xs truncate ${active ? '' : 'text-base-content/60'}" title="${esc(s.cwd||'')}">${esc(s.display)}</div>
-      ${showProject ? `<div class="text-[10px] text-base-content/40 truncate mt-0.5">${esc(s.projectName||'')}</div>` : ''}
-    </div>
-  </div>`);
-
-// ── Projects & Sessions ───────────────────────────────────────────────────────
-export async function loadProjects() {
-  try { projectsData.value = await api('GET', '/api/projects'); }
-  catch (e) { $('project-list').innerHTML = `<div class="px-3 py-3 text-xs text-error">${esc(e.message)}</div>`; }
+  // 2. Fetch fresh data in background
+  try {
+    const fresh = await api('GET', '/api/sessions');
+    sessionsData.value = fresh;
+    setCachedSessions(fresh);
+  } catch (e) {
+    if (!cached) {
+      const el = $('session-list');
+      if (el) el.innerHTML = `<div class="px-3 py-3 text-xs text-error">${esc(e.message)}</div>`;
+    }
+  }
 }
 
-export async function loadAllSessions() {
-  try { sessionsData.value = await api('GET', '/api/sessions'); }
-  catch (e) { $('session-list').innerHTML = `<div class="px-3 py-3 text-xs text-error">${esc(e.message)}</div>`; }
+async function loadWorkspaces() {
+  const cached = await getCachedWorkspaces();
+  if (cached) workspacesData.value = cached;
+  try {
+    const fresh = await api('GET', '/api/workspaces');
+    workspacesData.value = fresh;
+    setCachedWorkspaces(fresh);
+  } catch {}
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  if (diff < 60000)       return 'just now';
+  if (diff < 3600000)     return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000)    return `${Math.floor(diff / 3600000)}h ago`;
+  if (diff < 7*86400000)  return `${Math.floor(diff / 86400000)}d ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
+function sessionItemHtml(s) {
+  const active    = ctx.sessionId === s.sessionId;
+  const multiWs   = workspacesData.peek().length > 1;
+  const wsName    = s.configDir ? s.configDir.split('/').pop() : '';
+  const wsBadge   = multiWs && wsName
+    ? `<span class="text-[9px] text-base-content/30 flex-shrink-0 font-mono">${esc(wsName)}</span>`
+    : '';
+  return `<div class="px-3 py-2 cursor-pointer hover:bg-base-300 border-l-2
+              ${active ? 'border-primary bg-primary/5' : 'border-transparent'}"
+       data-session-id="${esc(s.sessionId)}"
+       data-session-cwd="${esc(s.cwd || '')}"
+       data-session-config-dir="${esc(s.configDir || '')}">
+    <div class="text-xs font-mono truncate ${active ? 'text-primary' : 'text-base-content/80'}"
+         title="${esc(s.cwd || '')}">${esc(s.cwd || '(no path)')}</div>
+    <div class="flex items-center justify-between mt-0.5 gap-2">
+      <span class="text-[10px] text-base-content/40 truncate flex-1">${esc(s.display || s.sessionId.slice(0,8))}</span>
+      <div class="flex items-center gap-1.5 flex-shrink-0">${wsBadge}<span class="text-[10px] text-base-content/30">${formatTime(s.updatedAt)}</span></div>
+    </div>
+  </div>`;
+}
+
+function renderSessionList(sessions) {
+  if (!sessions.length) return '<div class="px-3 py-4 text-xs text-base-content/40">No sessions</div>';
+  return sessions.map(sessionItemHtml).join('');
 }
 
 export function openProject(project) {
   batch(() => { currentProject.value = project; sessionFilter.value = project.path; });
   ctx.sessionId = null;
-  $('topbar-project').textContent = project.name;
+  $('topbar-project').textContent = project.path;
   $('welcome').classList.add('hidden');
   const pv = $('project-view');
   pv.classList.remove('hidden');
@@ -150,12 +205,16 @@ export function openProject(project) {
   switchTab('chat');
 }
 
-export async function resumeSession(sid, cwd) {
+export async function resumeSession(sid, cwd, configDir) {
   ctx.sessionId = sid;
+  ctx.configDir = configDir || null;
   if (cwd && cwd !== currentProject.peek()?.path) {
     const name = cwd.split('/').filter(Boolean).pop() || cwd;
     batch(() => { currentProject.value = { id: name, name, path: cwd }; sessionFilter.value = cwd; });
-    $('topbar-project').textContent = name;
+    $('topbar-project').textContent = cwd;
+    // Pre-fill root inputs with session cwd so user can see/edit the path
+    const fi = $('files-root-input'); if (fi && !filesRoot.peek()) fi.value = cwd;
+    const gi = $('git-root-input');   if (gi && !gitRoot.peek())   gi.value = cwd;
     const pv = $('project-view');
     pv.classList.remove('hidden');
     pv.style.display = 'flex';
@@ -164,7 +223,7 @@ export async function resumeSession(sid, cwd) {
   }
   clearMessages();
   switchTab('chat');
-  sessionsData.value = [...sessionsData.peek()]; // nudge for active-state re-render
+  sessionsData.value = [...sessionsData.peek()];
 
   appendSystemMsg('Loading history…');
   try {
@@ -178,8 +237,11 @@ export async function resumeSession(sid, cwd) {
           appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : 'Claude', m.content);
         else if (m.type === 'tool_use')
           renderToolUse({ name: m.name, input: m.input ?? {} });
+        else if (m.type === 'token_usage')
+          appendHistoryTokenBar(m.usage);
       }
-      appendSystemMsg(`── ${msgs.length} messages loaded · continuing session ──`);
+      const turnCount = msgs.filter(m => m.type === 'token_usage').length;
+      appendSystemMsg(`── history loaded · ${turnCount} turn${turnCount !== 1 ? 's' : ''} ──`);
     }
   } catch (e) {
     $('messages').innerHTML = '';
@@ -208,7 +270,7 @@ export async function showApp() {
   const app = $('app');
   app.classList.remove('hidden');
   app.style.display = 'flex';
-  await Promise.all([loadProjects(), loadAllSessions()]);
+  await Promise.all([loadAllSessions(), loadWorkspaces()]);
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -216,52 +278,85 @@ function openSidebar()  { $('sidebar').classList.add('open');    $('sidebar-over
 function closeSidebar() { $('sidebar').classList.remove('open'); $('sidebar-overlay').classList.add('hidden'); }
 function closeSidebarOnMobile() { if (window.innerWidth <= 640) closeSidebar(); }
 
-// ── Modal ─────────────────────────────────────────────────────────────────────
-function openNewProjectModal() {
-  $('new-project-name').value = '';
-  $('new-project-error').classList.add('hidden');
-  $('modal-new-project').showModal();
-  setTimeout(() => $('new-project-name').focus(), 50);
+function initSidebarToggle() {
+  const btn     = $('sidebar-toggle');
+  const sidebar = $('sidebar');
+  let collapsed = false;
+  let savedWidth = sidebar.style.width || '260px';
+
+  btn.addEventListener('click', () => {
+    collapsed = !collapsed;
+    if (collapsed) {
+      savedWidth = sidebar.style.width || '260px';
+      sidebar.style.width = '0';
+      sidebar.style.minWidth = '0';
+      sidebar.style.overflow = 'hidden';
+    } else {
+      sidebar.style.width = savedWidth;
+      sidebar.style.minWidth = '';
+      sidebar.style.overflow = '';
+    }
+    btn.textContent = collapsed ? '▶' : '◀';
+  });
 }
 
-async function createProject() {
-  const name = $('new-project-name').value.trim();
-  const errEl = $('new-project-error');
-  errEl.classList.add('hidden');
-  try {
-    const project = await api('POST', '/api/projects', { name });
-    $('modal-new-project').close();
-    projectsData.value = await api('GET', '/api/projects');
-    openProject(project);
-  } catch (e) {
-    errEl.textContent = e.message;
-    errEl.classList.remove('hidden');
-  }
+function initSidebarResize() {
+  const handle  = $('sidebar-resize');
+  const sidebar = $('sidebar');
+  let dragging  = false;
+
+  handle.addEventListener('mousedown', e => {
+    dragging = true;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const w = Math.min(Math.max(e.clientX, 160), 520);
+    sidebar.style.width = w + 'px';
+    sidebar.style.minWidth = '';
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+  });
 }
 
 // ── Init — render HTML, wire everything up ────────────────────────────────────
 export function initShell() {
-  // 1. Render static shell into #root
-  document.getElementById('root').innerHTML = AuthScreen() + AppShell();
+  // 1. Render into #root (ensure it fills viewport)
+  const root = document.getElementById('root');
+  root.style.cssText = 'display:flex;flex-direction:column;flex:1;height:100%';
+  root.innerHTML = AuthScreen() + AppShell();
 
-  // 2. Reactive project list (keyedList: DOM diff + slide animations)
-  const projectListData = computed(() => { currentProject.value; return projectsData.value; });
-  const setupProjects = keyedList(
-    projectListData,
-    p => ProjectItem({ p, active: currentProject.peek()?.id === p.id }),
-    p => p.id
-  );
-  setupProjects($('project-list'));
+  // 2. Workspace tabs
+  effect(() => {
+    const wss   = workspacesData.value;
+    const tabs  = $('ws-tabs');
+    if (!tabs) return;
+    if (wss.length <= 1) { tabs.innerHTML = ''; return; }
+    const activeId = sessionFilter.peek();  // sessionFilter holds configDir when filtering by ws
+    tabs.innerHTML = [{ id: null, name: 'All' }, ...wss].map(w => {
+      const active = w.id === null ? !activeId : activeId === w.configDir;
+      return `<button class="px-3 py-1.5 text-[11px] flex-shrink-0 border-b-2 whitespace-nowrap
+                ${active ? 'border-primary text-primary' : 'border-transparent text-base-content/50 hover:text-base-content'}"
+              data-ws-tab="${esc(w.configDir || '')}">
+        ${esc(w.name)}
+      </button>`;
+    }).join('');
+  });
 
   // 3. Reactive session list
-  const setupSessions = keyedList(
-    filteredSessions,
-    s => SessionItem({ s, active: ctx.sessionId === s.sessionId, showProject: !sessionFilter.peek() && !!s.cwd }),
-    s => s.sessionId
-  );
-  setupSessions($('session-list'));
+  effect(() => {
+    const el = $('session-list');
+    if (!el) return;
+    el.innerHTML = renderSessionList(filteredSessions.value);
+  });
 
-  // 4. Filter badge visibility
+  // 3. Filter badge
   watch(sessionFilter, f => {
     const badge = $('session-filter-badge');
     if (!badge) return;
@@ -269,7 +364,7 @@ export function initShell() {
     badge.title = f || '';
   });
 
-  // 5. Tab switching
+  // 4. Tab switching
   watch(currentTab, tab => {
     document.querySelectorAll('[data-tab]').forEach(btn => {
       const active = btn.dataset.tab === tab;
@@ -278,14 +373,18 @@ export function initShell() {
       btn.classList.toggle('text-base-content/50', !active);
       btn.classList.toggle('border-transparent',   !active);
     });
-    ['chat', 'files', 'git'].forEach(id => {
+    ['chat', 'files', 'git', 'shell'].forEach(id => {
       const el = $(`tab-${id}`);
       el.classList.toggle('hidden', id !== tab);
       el.style.display = id === tab ? 'flex' : '';
     });
   });
 
-  // 6. Listen for new sessions from WS (avoids circular import with chat.js)
+  // 5. Sidebar resize + collapse
+  initSidebarResize();
+  initSidebarToggle();
+
+  // 6. Listen for new sessions from WS
   document.addEventListener('sessions-changed', loadAllSessions);
 
   // 7. Event delegation
@@ -294,23 +393,42 @@ export function initShell() {
   delegate.on('click', '#hamburger', () => $('sidebar').classList.contains('open') ? closeSidebar() : openSidebar());
   delegate.on('click', '#sidebar-overlay', closeSidebar);
 
-  delegate.on('click', '#btn-new-project, #btn-new-project-welcome', openNewProjectModal);
-  delegate.on('click', '#modal-cancel',   () => $('modal-new-project').close());
-  delegate.on('click', '#modal-create',   createProject);
-  delegate.on('keydown', '#new-project-name', e => { if (e.key === 'Enter') createProject(); });
-
-  delegate.on('click', '[data-project-id]', (e, el) => {
-    openProject({ id: el.dataset.projectId, name: el.dataset.projectName, path: el.dataset.projectPath });
-    closeSidebarOnMobile();
-  });
-  delegate.on('click', '[data-session-id]', (e, el) => {
-    resumeSession(el.dataset.sessionId, el.dataset.sessionCwd || null);
-    closeSidebarOnMobile();
+  delegate.on('input', '#session-search', (_, el) => { sessionSearch.value = el.value; });
+  delegate.on('click', '#session-sort-btn', () => {
+    sessionSort.value = sessionSort.peek() === 'time' ? 'project' : 'time';
+    $('session-sort-btn').textContent = `⇅ ${sessionSort.peek()}`;
   });
   delegate.on('click', '#session-filter-badge', () => { sessionFilter.value = null; });
+  delegate.on('click', '[data-ws-tab]', (_, el) => { sessionFilter.value = el.dataset.wsTab || null; });
+  delegate.on('click', '#btn-settings', openSettings);
+
+  delegate.on('click', '[data-session-id]', (e, el) => {
+    resumeSession(el.dataset.sessionId, el.dataset.sessionCwd || null, el.dataset.sessionConfigDir || null);
+    closeSidebarOnMobile();
+  });
 
   delegate.on('click', '[data-tab]',       (e, el) => switchTab(el.dataset.tab));
-  delegate.on('click', '#btn-new-session', newSession);
+
+  // Custom root path for Files / Git tabs — POST to resolve & validate
+  const applyRoot = async (inputId, sig) => {
+    const input = $(inputId);
+    const raw   = input?.value.trim();
+    if (!raw) { sig.value = ''; return; }
+    try {
+      const result = await api('POST', '/api/resolve-path', { path: raw });
+      sig.value = result.path;
+      input.value = result.path;  // show the resolved absolute path
+    } catch (e) {
+      input.style.color = 'oklch(var(--er))';
+      input.title = e.message;
+      setTimeout(() => { input.style.color = ''; input.title = ''; }, 2000);
+    }
+  };
+  delegate.on('click', '#files-root-btn', () => applyRoot('files-root-input', filesRoot));
+  delegate.on('click', '#git-root-btn',   () => applyRoot('git-root-input',   gitRoot));
+  delegate.on('keydown', '#files-root-input', e => { if (e.key === 'Enter') applyRoot('files-root-input', filesRoot); });
+  delegate.on('keydown', '#git-root-input',   e => { if (e.key === 'Enter') applyRoot('git-root-input',   gitRoot); });
+  delegate.on('click', '#btn-new-session, #btn-new-session-welcome', newSession);
   delegate.on('click', '#send-btn',        sendMessage);
   delegate.on('click', '#stop-btn',        stopProcessing);
   delegate.on('click', '#btn-logout',      () => { ctx.token = null; localStorage.removeItem('token'); location.reload(); });

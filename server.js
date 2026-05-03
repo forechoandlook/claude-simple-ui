@@ -18,11 +18,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3000');
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
-const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT || path.join(os.homedir(), 'projects');
-const CREDENTIALS_FILE = process.env.CREDENTIALS_FILE || path.join(__dirname, '.credentials.json');
+const WORKSPACES_ROOT   = process.env.WORKSPACES_ROOT   || path.join(os.homedir(), 'projects');
+const CREDENTIALS_FILE  = process.env.CREDENTIALS_FILE  || path.join(__dirname, '.credentials.json');
+const WORKSPACES_FILE   = process.env.WORKSPACES_FILE   || path.join(__dirname, '.workspaces.json');
 const CLAUDE_CLI_PATH = process.env.CLAUDE_CLI_PATH || 'claude';
 const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+
+// All config dirs to scan — seeded from env, then kept in sync with workspace store
+const CLAUDE_CONFIG_DIRS = (() => {
+  const extra = (process.env.CLAUDE_CONFIG_DIRS || '')
+    .split(',').map(s => s.trim().replace(/^~/, os.homedir())).filter(Boolean);
+  return [...new Set([CLAUDE_CONFIG_DIR, ...extra])];
+})();
 
 // ─── Auth storage (file-based, no SQLite) ────────────────────────────────────
 let credStore = null;
@@ -30,10 +37,13 @@ let credStore = null;
 async function loadCreds() {
   if (credStore) return credStore;
   try {
-    const data = await fs.readFile(CREDENTIALS_FILE, 'utf8');
-    credStore = JSON.parse(data);
+    credStore = JSON.parse(await fs.readFile(CREDENTIALS_FILE, 'utf8'));
   } catch {
     credStore = { users: [] };
+  }
+  if (!credStore.jwtSecret) {
+    credStore.jwtSecret = crypto.randomBytes(32).toString('hex');
+    await fs.writeFile(CREDENTIALS_FILE, JSON.stringify(credStore, null, 2));
   }
   return credStore;
 }
@@ -46,6 +56,39 @@ async function saveCreds(store) {
 async function hasUsers() {
   const store = await loadCreds();
   return store.users.length > 0;
+}
+
+// ─── Workspace storage ────────────────────────────────────────────────────────
+let wsStore = null;
+
+async function loadWorkspacesStore() {
+  if (wsStore) return wsStore;
+  try {
+    wsStore = JSON.parse(await fs.readFile(WORKSPACES_FILE, 'utf8'));
+  } catch {
+    // Seed from env
+    wsStore = { workspaces: CLAUDE_CONFIG_DIRS.map((d, i) => ({
+      id:        crypto.randomUUID(),
+      name:      i === 0 ? 'default' : path.basename(d),
+      configDir: d,
+    })) };
+  }
+  return wsStore;
+}
+
+async function saveWorkspacesStore() {
+  await fs.writeFile(WORKSPACES_FILE, JSON.stringify(wsStore, null, 2));
+}
+
+async function getWorkspaces() {
+  return (await loadWorkspacesStore()).workspaces;
+}
+
+// Keep CLAUDE_CONFIG_DIRS in sync with the stored workspaces at runtime
+async function syncConfigDirs() {
+  const wss = await getWorkspaces();
+  const dirs = [...new Set(wss.map(w => w.configDir))];
+  CLAUDE_CONFIG_DIRS.splice(0, CLAUDE_CONFIG_DIRS.length, ...dirs);
 }
 
 async function findUser(username) {
@@ -61,16 +104,15 @@ async function createUser(username, passwordHash) {
   return user;
 }
 
+function jwtSecret() { return credStore?.jwtSecret; }
+
 function makeToken(user) {
-  return jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ userId: user.id, username: user.username }, jwtSecret(), { expiresIn: '7d' });
 }
 
 function verifyToken(token) {
-  try {
-    return jwt.verify(token, JWT_SECRET);
-  } catch {
-    return null;
-  }
+  try { return jwt.verify(token, jwtSecret()); }
+  catch { return null; }
 }
 
 // If AUTH_USERNAME + AUTH_PASSWORD env vars set, bootstrap a user on startup
@@ -105,10 +147,15 @@ function safePath(base, rel) {
 
 // Resolve the project root from a request.
 // Accepts ?root=/abs/path (for external projects) or falls back to WORKSPACES_ROOT/:id.
+function expandPath(p) {
+  if (!p) return p;
+  return p.replace(/^~/, os.homedir());
+}
+
 function resolveProjectRoot(req) {
-  const root = req.query.root;
+  const root = req.query.root || req.body?.root;
   if (root) {
-    const resolved = path.resolve(root);
+    const resolved = path.resolve(expandPath(root));
     if (!path.isAbsolute(resolved) || resolved === '/' || resolved.includes('\0'))
       throw new Error('Invalid root path');
     return resolved;
@@ -142,20 +189,21 @@ async function isGitRepo(dir) {
 
 // ─── Claude session scanning ──────────────────────────────────────────────────
 
-// Read history.jsonl → sessionId → display name map
+// Read history.jsonl → sessionId → display name map (across all config dirs)
 async function loadHistoryNames() {
-  const histPath = path.join(CLAUDE_CONFIG_DIR, 'history.jsonl');
   const map = new Map();
-  try {
-    const stream = fsSync.createReadStream(histPath);
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    for await (const line of rl) {
-      try {
-        const d = JSON.parse(line);
-        if (d.sessionId && d.display) map.set(d.sessionId, d.display);
-      } catch {}
-    }
-  } catch {}
+  await Promise.all(CLAUDE_CONFIG_DIRS.map(async dir => {
+    try {
+      const stream = fsSync.createReadStream(path.join(dir, 'history.jsonl'));
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      for await (const line of rl) {
+        try {
+          const d = JSON.parse(line);
+          if (d.sessionId && d.display) map.set(d.sessionId, d.display);
+        } catch {}
+      }
+    } catch {}
+  }));
   return map;
 }
 
@@ -204,20 +252,16 @@ async function readSessionFirstMessage(filePath) {
   return null;
 }
 
-// Scan ALL sessions from ~/.claude/projects/
-// Returns every session with its actual cwd so the client can resume to the right directory.
-async function scanAllSessions(filterCwd = null) {
-  const projectsDir = path.join(CLAUDE_CONFIG_DIR, 'projects');
-  const nameMap = await loadHistoryNames();
+// Scan sessions from a single config dir
+async function scanConfigDir(configDir, nameMap, filterCwd) {
+  const projectsDir = path.join(configDir, 'projects');
   const sessions = [];
-
   let projectDirs;
   try {
-    projectDirs = (await fs.readdir(projectsDir, { withFileTypes: true }))
-      .filter(e => e.isDirectory());
+    projectDirs = (await fs.readdir(projectsDir, { withFileTypes: true })).filter(e => e.isDirectory());
   } catch { return []; }
 
-  await Promise.all(projectDirs.map(async (dirEntry) => {
+  await Promise.all(projectDirs.map(async dirEntry => {
     const projectDir = path.join(projectsDir, dirEntry.name);
     let entries;
     try { entries = await fs.readdir(projectDir, { withFileTypes: true }); }
@@ -226,27 +270,36 @@ async function scanAllSessions(filterCwd = null) {
     const jsonlFiles = entries.filter(e =>
       e.isFile() && e.name.endsWith('.jsonl') && !e.name.startsWith('agent-')
     );
-
-    await Promise.all(jsonlFiles.map(async (fileEntry) => {
+    await Promise.all(jsonlFiles.map(async fileEntry => {
       const filePath = path.join(projectDir, fileEntry.name);
       try {
         const [stat, meta] = await Promise.all([fs.stat(filePath), readSessionMeta(filePath)]);
-        // Skip if filtering by cwd and it doesn't match
         if (filterCwd && meta.cwd !== filterCwd) return;
-
         const sessionId = meta.sessionId || fileEntry.name.replace('.jsonl', '');
         const firstMsg = await readSessionFirstMessage(filePath);
         sessions.push({
           sessionId,
-          cwd: meta.cwd || null,
-          projectName: meta.cwd ? path.basename(meta.cwd) : dirEntry.name,
-          display: nameMap.get(sessionId) || firstMsg || 'Session',
-          updatedAt: stat.mtimeMs,
+          cwd:        meta.cwd || null,
+          configDir,
+          display:    nameMap.get(sessionId) || firstMsg || 'Session',
+          updatedAt:  stat.mtimeMs,
         });
       } catch {}
     }));
   }));
+  return sessions;
+}
 
+// Scan ALL sessions across all configured claude config dirs
+async function scanAllSessions(filterCwd = null) {
+  const nameMap = await loadHistoryNames();
+  const results = await Promise.all(CLAUDE_CONFIG_DIRS.map(d => scanConfigDir(d, nameMap, filterCwd)));
+  // Deduplicate by sessionId (same session can't appear in two dirs, but be safe)
+  const seen = new Set();
+  const sessions = results.flat().filter(s => {
+    if (seen.has(s.sessionId)) return false;
+    seen.add(s.sessionId); return true;
+  });
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
@@ -254,8 +307,11 @@ async function scanAllSessions(filterCwd = null) {
 const activeSessions = new Map();
 
 function mapOptions(options = {}) {
+  const env = { ...process.env };
+  // Use the session's configDir if specified, so the SDK reads the right workspace
+  if (options.configDir) env.CLAUDE_CONFIG_DIR = options.configDir;
   const opts = {
-    env: { ...process.env },
+    env,
     pathToClaudeCodeExecutable: CLAUDE_CLI_PATH,
     tools: { type: 'preset', preset: 'claude_code' },
     systemPrompt: { type: 'preset', preset: 'claude_code' },
@@ -319,6 +375,26 @@ function abortSession(sessionId) {
 
 // ─── Express app ──────────────────────────────────────────────────────────────
 const app = express();
+// File upload route must be registered BEFORE express.json() to get raw stream
+app.post('/api/projects/:id/file', authMiddleware, (req, res) => {
+  (async () => {
+    const projectPath = resolveProjectRoot(req);
+    const rel = req.query.path;
+    if (!rel) return res.status(400).json({ error: 'path required' });
+    const filePath = safePath(projectPath, rel);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const writer = fsSync.createWriteStream(filePath);
+    req.pipe(writer);
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+      req.on('error', reject);
+    });
+    const stat = await fs.stat(filePath);
+    res.json({ ok: true, size: stat.size });
+  })().catch(e => res.status(500).json({ error: e.message }));
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -418,9 +494,30 @@ app.get('/api/projects/:id/file', authMiddleware, async (req, res) => {
     if (!rel) return res.status(400).json({ error: 'path required' });
     const filePath = safePath(projectPath, rel);
     const stat = await fs.stat(filePath);
-    if (stat.size > 1024 * 1024) return res.status(413).json({ error: 'File too large (>1MB)' });
+    if (req.query.download === 'true') {
+      const name = path.basename(filePath);
+      res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      return fsSync.createReadStream(filePath).pipe(res);
+    }
+    if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ error: 'File too large (>2MB)' });
     const content = await fs.readFile(filePath, 'utf8');
-    res.json({ content });
+    res.json({ content, size: stat.size });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// Delete file or directory
+app.delete('/api/projects/:id/file', authMiddleware, async (req, res) => {
+  try {
+    const projectPath = resolveProjectRoot(req);
+    const rel = req.query.path;
+    if (!rel) return res.status(400).json({ error: 'path required' });
+    const filePath = safePath(projectPath, rel);
+    await fs.rm(filePath, { recursive: true, force: true });
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -456,6 +553,65 @@ app.get('/api/projects/:id/git/diff', authMiddleware, async (req, res) => {
   }
 });
 
+// Resolve and validate an arbitrary path (~ expansion, existence check)
+app.post('/api/resolve-path', authMiddleware, async (req, res) => {
+  try {
+    const { path: rawPath } = req.body;
+    if (!rawPath?.trim()) return res.status(400).json({ error: 'path required' });
+    const resolved = path.resolve(expandPath(rawPath.trim()));
+    if (resolved === '/' || resolved.includes('\0'))
+      return res.status(400).json({ error: 'Invalid path' });
+    const stat = await fs.stat(resolved).catch(() => null);
+    if (!stat) return res.status(404).json({ error: `Path not found: ${resolved}` });
+    res.json({ path: resolved, isDir: stat.isDirectory(), isGit: await isGitRepo(resolved).catch(() => false) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Workspaces CRUD
+app.get('/api/workspaces', authMiddleware, async (req, res) => {
+  res.json(await getWorkspaces());
+});
+
+app.post('/api/workspaces', authMiddleware, async (req, res) => {
+  try {
+    const { name, configDir } = req.body;
+    if (!name?.trim() || !configDir?.trim()) return res.status(400).json({ error: 'name and configDir required' });
+    const dir = configDir.trim().replace(/^~/, os.homedir());
+    const store = await loadWorkspacesStore();
+    if (store.workspaces.some(w => w.configDir === dir))
+      return res.status(409).json({ error: 'Workspace with this path already exists' });
+    const ws = { id: crypto.randomUUID(), name: name.trim(), configDir: dir };
+    store.workspaces.push(ws);
+    await saveWorkspacesStore();
+    await syncConfigDirs();
+    res.json(ws);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/workspaces/:id', authMiddleware, async (req, res) => {
+  try {
+    const store = await loadWorkspacesStore();
+    const idx = store.workspaces.findIndex(w => w.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Not found' });
+    if (store.workspaces.length === 1) return res.status(400).json({ error: 'Cannot remove the last workspace' });
+    store.workspaces.splice(idx, 1);
+    await saveWorkspacesStore();
+    await syncConfigDirs();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/workspaces/:id', authMiddleware, async (req, res) => {
+  try {
+    const store = await loadWorkspacesStore();
+    const ws = store.workspaces.find(w => w.id === req.params.id);
+    if (!ws) return res.status(404).json({ error: 'Not found' });
+    if (req.body.name) ws.name = req.body.name.trim();
+    await saveWorkspacesStore();
+    res.json(ws);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Sessions: global list (all ~/.claude/projects/) with optional ?cwd= filter
 app.get('/api/sessions', authMiddleware, async (req, res) => {
   try {
@@ -467,17 +623,18 @@ app.get('/api/sessions', authMiddleware, async (req, res) => {
   }
 });
 
-// Find JSONL file path for a given sessionId by scanning all project dirs
+// Find JSONL file path for a given sessionId across all config dirs
 async function findSessionFile(sessionId) {
-  const projectsDir = path.join(CLAUDE_CONFIG_DIR, 'projects');
-  let projectDirs;
-  try { projectDirs = await fs.readdir(projectsDir); }
-  catch { return null; }
-
-  for (const dir of projectDirs) {
-    const candidate = path.join(projectsDir, dir, `${sessionId}.jsonl`);
-    try { await fs.access(candidate); return candidate; }
-    catch {}
+  for (const configDir of CLAUDE_CONFIG_DIRS) {
+    const projectsDir = path.join(configDir, 'projects');
+    let projectDirs;
+    try { projectDirs = await fs.readdir(projectsDir); }
+    catch { continue; }
+    for (const dir of projectDirs) {
+      const candidate = path.join(projectsDir, dir, `${sessionId}.jsonl`);
+      try { await fs.access(candidate); return candidate; }
+      catch {}
+    }
   }
   return null;
 }
@@ -491,6 +648,19 @@ function isInternal(text) {
 // Parse a session JSONL and return simplified messages for display
 async function parseSessionMessages(filePath) {
   const messages = [];
+  // Accumulate usage per "turn" (group of assistant lines sharing the same promptId/uuid chain)
+  // Simplest heuristic: sum usage across all assistant lines, emit a token bar after each user turn's responses
+  let pendingUsage = null; // usage accumulated since last user message
+
+  function flushUsage() {
+    if (!pendingUsage) return;
+    const u = pendingUsage;
+    pendingUsage = null;
+    if (u.input_tokens || u.output_tokens) {
+      messages.push({ type: 'token_usage', usage: u });
+    }
+  }
+
   try {
     const stream = fsSync.createReadStream(filePath);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -498,9 +668,12 @@ async function parseSessionMessages(filePath) {
       let d;
       try { d = JSON.parse(line); } catch { continue; }
 
-      // User message
-      if (d.type === 'user' && Array.isArray(d.message?.content)) {
-        for (const part of d.message.content) {
+      // User message — flush previous turn's usage first
+      if (d.type === 'user' && d.message?.content) {
+        flushUsage();
+        const content = d.message.content;
+        const parts = Array.isArray(content) ? content : [{ type: 'text', text: String(content) }];
+        for (const part of parts) {
           if (part.type === 'text' && part.text?.trim() && !isInternal(part.text.trim())) {
             messages.push({ role: 'user', type: 'text', content: part.text.trim(), ts: d.timestamp });
           }
@@ -508,8 +681,16 @@ async function parseSessionMessages(filePath) {
         continue;
       }
 
-      // Assistant message
+      // Assistant message — accumulate usage
       if (d.type === 'assistant' && Array.isArray(d.message?.content)) {
+        const u = d.message.usage;
+        if (u) {
+          if (!pendingUsage) pendingUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+          pendingUsage.input_tokens               += u.input_tokens               ?? 0;
+          pendingUsage.output_tokens              += u.output_tokens              ?? 0;
+          pendingUsage.cache_creation_input_tokens+= u.cache_creation_input_tokens?? 0;
+          pendingUsage.cache_read_input_tokens    += u.cache_read_input_tokens    ?? 0;
+        }
         for (const part of d.message.content) {
           if (part.type === 'text' && part.text?.trim()) {
             messages.push({ role: 'assistant', type: 'text', content: part.text.trim(), ts: d.timestamp });
@@ -519,6 +700,7 @@ async function parseSessionMessages(filePath) {
         }
       }
     }
+    flushUsage(); // flush last turn
   } catch {}
   return messages;
 }
@@ -540,13 +722,15 @@ app.get('/api/sessions/:sessionId/messages', authMiddleware, async (req, res) =>
 app.get('/api/projects/:id/git/log', authMiddleware, async (req, res) => {
   try {
     const projectPath = resolveProjectRoot(req);
-    if (!(await isGitRepo(projectPath))) return res.json({ commits: [] });
-    const out = await git(['log', '--oneline', '-20'], projectPath).catch(() => '');
-    const commits = out.trim().split('\n').filter(Boolean).map(line => ({
-      hash: line.slice(0, 7),
-      message: line.slice(8),
-    }));
-    res.json({ commits });
+    if (!(await isGitRepo(projectPath))) return res.json({ graph: '', commits: [] });
+    const graph = await git(
+      ['log', '--graph', '--oneline', '--all', '--decorate', '-30'],
+      projectPath
+    ).catch(() => '');
+    const commits = (await git(['log', '--oneline', '-20'], projectPath).catch(() => ''))
+      .trim().split('\n').filter(Boolean)
+      .map(line => ({ hash: line.slice(0, 7), message: line.slice(8) }));
+    res.json({ graph, commits });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -554,7 +738,19 @@ app.get('/api/projects/:id/git/log', authMiddleware, async (req, res) => {
 
 // ─── HTTP + WebSocket server ───────────────────────────────────────────────────
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws/chat' });
+const wss      = new WebSocketServer({ noServer: true });
+const wssShell = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+  const pathname = new URL(req.url, 'http://localhost').pathname;
+  if (pathname === '/ws/chat') {
+    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+  } else if (pathname === '/ws/shell') {
+    wssShell.handleUpgrade(req, socket, head, ws => wssShell.emit('connection', ws, req));
+  } else {
+    socket.destroy();
+  }
+});
 
 wss.on('connection', (ws, req) => {
   // Extract token from query or first message
@@ -621,9 +817,53 @@ wss.on('connection', (ws, req) => {
   ws.on('error', (e) => console.error('[ws]', e.message));
 });
 
+// ─── Shell WebSocket (/ws/shell) ──────────────────────────────────────────────
+wssShell.on('connection', (ws, req) => {
+  const url     = new URL(req.url, 'http://localhost');
+  const token   = url.searchParams.get('token');
+  const decoded = verifyToken(token);
+  if (!decoded) { ws.close(1008, 'Unauthorized'); return; }
+
+  const cwd  = url.searchParams.get('cwd') || os.homedir();
+  const send = d => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(d)); };
+
+  // Use stdbuf to force line-buffered output; fall back to bash directly
+  let proc;
+  try {
+    proc = spawn('bash', ['--norc', '--noprofile'], {
+      cwd: fsSync.existsSync(cwd) ? cwd : os.homedir(),
+      env: { ...process.env, TERM: 'xterm-256color', PS1: '\\[\\033[32m\\]\\w\\[\\033[0m\\]$ ', HISTFILE: '' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    send({ type: 'error', data: e.message });
+    ws.close();
+    return;
+  }
+
+  proc.stdout.on('data', d => send({ type: 'output', data: d.toString() }));
+  proc.stderr.on('data', d => send({ type: 'output', data: d.toString() }));
+  proc.on('exit',  (code) => { send({ type: 'exit', code }); ws.close(); });
+  proc.on('error', (e)    => { send({ type: 'error', data: e.message }); });
+
+  ws.on('message', raw => {
+    let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.type === 'input' && proc.stdin.writable) {
+      proc.stdin.write(msg.data);
+    } else if (msg.type === 'resize') {
+      // no-op without pty, kept for protocol compatibility
+    }
+  });
+
+  ws.on('close', () => { try { proc.kill('SIGHUP'); } catch {} });
+  ws.on('error', e => console.error('[ws/shell]', e.message));
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
+await loadCreds();        // ensures credStore.jwtSecret exists before any request
 await bootstrapEnvUser();
 await ensureWorkspacesRoot();
+await syncConfigDirs(); // load stored workspaces → update CLAUDE_CONFIG_DIRS
 
 server.listen(PORT, () => {
   console.log(`\n  Claude Simple UI running at http://localhost:${PORT}\n`);

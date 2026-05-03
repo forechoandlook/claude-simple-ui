@@ -1,3 +1,6 @@
 node_modules
 package-lock.json
 mini-react
+.credentials.json
+.env.example
+.jwt_secret

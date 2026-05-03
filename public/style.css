@@ -52,3 +52,13 @@
 .tool-card.open .tool-detail { display: block; }
 .tool-card.open .tool-chevron { transform: rotate(90deg); }
 .tool-chevron { transition: transform .15s; display: inline-block; }
+
+/* ── Long message collapse ───────────────────────────────────────────────── */
+.msg-card .msg-body { max-height: 8em; overflow: hidden; mask-image: linear-gradient(to bottom, black 60%, transparent 100%); }
+.msg-card.open .msg-body { max-height: none; mask-image: none; }
+.msg-expand-btn { display: block; }
+
+/* ── Git graph ───────────────────────────────────────────────────────────── */
+.git-graph { font-family: monospace; font-size: 11px; line-height: 1.5; white-space: pre; color: oklch(var(--bc)/.7); }
+.git-graph .gh { color: oklch(var(--su)); font-weight: 600; }
+.git-graph .gm { color: oklch(var(--bc)/.85); }
