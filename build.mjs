@@ -5,7 +5,10 @@ import { readFile, writeFile, mkdir, copyFile, rm } from 'fs/promises';
 const pkg     = JSON.parse(await readFile('package.json', 'utf8'));
 const version = pkg.version;
 const REPO    = 'forechoandlook/claude-simple-ui';
-const CDN     = `https://cdn.jsdelivr.net/gh/${REPO}@v${version}/dist`;
+// Serve assets from the local static server (dist/ is served at /) instead of
+// jsDelivr. The CDN 404s until the repo + git tag are actually published.
+const USE_CDN = process.env.USE_CDN === '1';
+const CDN     = USE_CDN ? `https://cdn.jsdelivr.net/gh/${REPO}@v${version}/dist` : '';
 
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist');
@@ -47,6 +50,15 @@ try {
   await writeFile('dist/marked.min.js', await res.text());
 }
 
+// 3b. highlight.js — fetch core + a dark theme, inline into dist
+console.log('Fetching highlight.js...');
+{
+  const hjsJs  = await fetch('https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/highlight.min.js');
+  await writeFile('dist/highlight.min.js', await hjsJs.text());
+  const hjsCss = await fetch('https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/github-dark.min.css');
+  await writeFile('dist/highlight.min.css', await hjsCss.text());
+}
+
 // 4. index.html pointing to jsDelivr CDN
 await writeFile('dist/index.html', `<!DOCTYPE html>
 <html lang="en" data-theme="night">
@@ -55,7 +67,9 @@ await writeFile('dist/index.html', `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <title>Claude Code</title>
   <link rel="stylesheet" href="${CDN}/style.${version}.min.css">
+  <link rel="stylesheet" href="${CDN}/highlight.min.css">
   <script src="${CDN}/marked.min.js"></script>
+  <script src="${CDN}/highlight.min.js"></script>
 </head>
 <body class="h-dvh overflow-hidden flex flex-col bg-base-100 text-base-content">
   <div id="root" class="flex flex-col flex-1 overflow-hidden"></div>

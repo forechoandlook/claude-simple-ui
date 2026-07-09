@@ -1,7 +1,7 @@
 // shell.js — HTML templates, layout bootstrap, sidebar, tabs, auth, modals
 import { watch, effect, batch, computed, delegate, esc, $ } from './lib.js';
 import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort,
-         filteredSessions, currentProject, currentTab, filesRoot, gitRoot,
+         expandedFolders, filteredSessions, currentProject, currentTab, filesRoot, gitRoot,
          currentModel, currentEffort, currentPermission, ctx } from './state.js';
 import { api } from './api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
@@ -80,9 +80,14 @@ const AppShell = () => `
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="files">Files</button>
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="git">Git</button>
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="shell">Shell</button>
+            <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="memory">🧠 Memory</button>
           </div>
-          <div id="tab-chat" class="flex flex-col flex-1 overflow-hidden">
+          <div id="tab-chat" class="flex flex-col flex-1 overflow-hidden relative">
             <div id="messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
+            <div id="scroll-nav" class="absolute right-3 bottom-24 flex flex-col gap-1.5 z-10">
+              <button id="scroll-top-btn" class="scroll-fab hidden" title="Jump to top">↑</button>
+              <button id="scroll-bottom-btn" class="scroll-fab hidden" title="Jump to bottom">↓</button>
+            </div>
             <div id="permission-requests"></div>
             <div class="flex flex-col border-t border-base-300 bg-base-200 flex-shrink-0">
               <div id="chat-opts" class="hidden flex items-center gap-1.5 px-3 pt-2 flex-wrap">
@@ -150,6 +155,14 @@ const AppShell = () => `
               <button id="git-root-btn" class="btn btn-ghost btn-xs text-xs">Go</button>
             </div>
             <div id="git-area" class="flex-1 overflow-y-auto"></div>
+          </div>
+          <div id="tab-memory" class="hidden flex-col flex-1 overflow-hidden">
+            <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
+              <span class="text-xs text-base-content/40 flex-shrink-0">🧠 Project memory</span>
+              <span class="flex-1"></span>
+              <button id="memory-refresh" class="btn btn-ghost btn-xs text-xs">Refresh</button>
+            </div>
+            <div id="memory-area" class="flex-1 overflow-y-auto text-sm"></div>
           </div>
         </div>
       </div>
@@ -238,9 +251,70 @@ function sessionItemHtml(s) {
   </div>`;
 }
 
+// Group sessions by their cwd (folder). Each folder is a collapsible header;
+// collapsed by default, expand to reveal the sessions inside.
 function renderSessionList(sessions) {
   if (!sessions.length) return '<div class="px-3 py-4 text-xs text-base-content/40">No sessions</div>';
-  return sessions.map(sessionItemHtml).join('');
+
+  const groups = new Map();
+  for (const s of sessions) {
+    const key = s.cwd || '(no path)';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+
+  const expanded = expandedFolders.value;
+  // A search auto-expands every matching folder so results are visible.
+  const forceOpen = !!sessionSearch.value.trim();
+
+  return [...groups.entries()].map(([cwd, items]) => {
+    const open  = forceOpen || expanded.has(cwd);
+    const name  = cwd === '(no path)' ? '(no path)' : (cwd.split('/').filter(Boolean).pop() || cwd);
+    const header = `
+      <div class="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-base-300 select-none"
+           data-folder="${esc(cwd)}">
+        <span class="text-[10px] text-base-content/40 w-3 flex-shrink-0">${open ? '▾' : '▸'}</span>
+        <span class="text-xs font-medium truncate flex-1" title="${esc(cwd)}">${esc(name)}</span>
+        <span class="text-[10px] text-base-content/30 flex-shrink-0">${items.length}</span>
+      </div>`;
+    const body = open ? `<div class="border-l border-base-300 ml-3">${items.map(sessionItemHtml).join('')}</div>` : '';
+    return header + body;
+  }).join('');
+}
+
+function mdToHtml(text) {
+  if (!text) return '';
+  if (typeof marked === 'undefined') return `<pre class="whitespace-pre-wrap text-xs">${esc(text)}</pre>`;
+  try { return marked.parse(text, { breaks: true, gfm: true }); } catch { return `<pre class="whitespace-pre-wrap text-xs">${esc(text)}</pre>`; }
+}
+
+// Load the persistent memory for the currently open session into the Memory tab.
+async function loadMemoryTab() {
+  const body = $('memory-area');
+  if (!body) return;
+  if (!ctx.sessionId) {
+    body.innerHTML = '<div class="p-4 text-xs text-base-content/40">Open or resume a session to view its memory.</div>';
+    return;
+  }
+  body.innerHTML = '<div class="p-4 text-xs text-base-content/40">Loading…</div>';
+  try {
+    const mem = await api('GET', `/api/sessions/${ctx.sessionId}/memory`);
+    const parts = [];
+    if (mem.index) {
+      parts.push(`<div class="mb-4"><div class="text-[11px] uppercase tracking-wide text-base-content/40 mb-1">Index (MEMORY.md)</div>
+                  <div class="prose prose-sm max-w-none">${mdToHtml(mem.index)}</div></div>`);
+    }
+    for (const f of (mem.files || [])) {
+      parts.push(`<div class="mb-3 border border-base-300 rounded-lg overflow-hidden">
+                    <div class="px-3 py-1.5 bg-base-300/50 text-xs font-mono text-base-content/70">${esc(f.name)}</div>
+                    <div class="px-3 py-2 prose prose-sm max-w-none">${mdToHtml(f.content)}</div>
+                  </div>`);
+    }
+    if (!parts.length) parts.push('<div class="text-base-content/40 text-xs">No memory saved for this project yet.</div>');
+    body.innerHTML = `<div class="p-4">${parts.join('')}</div>`;
+  } catch (e) {
+    body.innerHTML = `<div class="p-4 text-error text-xs">${esc(e?.message ?? String(e))}</div>`;
+  }
 }
 
 export function openProject(project) {
@@ -494,11 +568,12 @@ export function initShell() {
       btn.classList.toggle('text-base-content/50', !active);
       btn.classList.toggle('border-transparent',   !active);
     });
-    ['chat', 'files', 'git', 'shell'].forEach(id => {
+    ['chat', 'files', 'git', 'shell', 'memory'].forEach(id => {
       const el = $(`tab-${id}`);
       el.classList.toggle('hidden', id !== tab);
       el.style.display = id === tab ? 'flex' : '';
     });
+    if (tab === 'memory') loadMemoryTab();
   });
 
   // 5. Sidebar resize + collapse
@@ -512,7 +587,7 @@ export function initShell() {
   document.addEventListener('router:session', async ({ detail: { id, tab } }) => {
     const s = sessionsData.peek().find(s => s.sessionId === id);
     await resumeSession(id, s?.cwd || null, s?.configDir || null);
-    if (tab && ['chat','files','git','shell'].includes(tab)) switchTab(tab);
+    if (tab && ['chat','files','git','shell','memory'].includes(tab)) switchTab(tab);
   });
 
   // 7. Event delegation
@@ -535,6 +610,15 @@ export function initShell() {
     resumeSession(el.dataset.sessionId, el.dataset.sessionCwd || null, el.dataset.sessionConfigDir || null);
     closeSidebarOnMobile();
   });
+
+  delegate.on('click', '[data-folder]', (_, el) => {
+    const cwd  = el.dataset.folder;
+    const next = new Set(expandedFolders.peek());
+    next.has(cwd) ? next.delete(cwd) : next.add(cwd);
+    expandedFolders.value = next;   // new Set → triggers the session-list effect
+  });
+
+  delegate.on('click', '#memory-refresh', loadMemoryTab);
 
   delegate.on('click', '[data-tab]',       (e, el) => switchTab(el.dataset.tab));
 

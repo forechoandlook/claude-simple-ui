@@ -3,6 +3,18 @@ import { watch, delegate, esc, $ } from './lib.js';
 import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEffort, currentPermission } from './state.js';
 import { sendWs } from './api.js';
 
+// ── Scroll helpers ────────────────────────────────────────────────────────────
+// True when the user is at (or near) the bottom of the message list.
+function atBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+// Scroll to bottom only if the user was already following along; otherwise leave
+// their scroll position untouched so reading history isn't interrupted.
+function stickBottom(el, force) {
+  if (!el) return;
+  if (force || atBottom(el)) el.scrollTop = el.scrollHeight;
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 export function connectWS() {
   ctx.ws?.close();
@@ -212,7 +224,8 @@ export function appendMsg(role, _label, text) {
   const msgs = $('messages');
   if (!msgs) return;
   msgs.insertAdjacentHTML('beforeend', bubbleHtml(role, text));
-  msgs.scrollTop = msgs.scrollHeight;
+  highlightCode(msgs.lastElementChild);
+  stickBottom(msgs, role === 'user');   // always jump to your own message
 }
 
 export function appendSystemMsg(text) { appendMsg('system', '', text); }
@@ -296,7 +309,7 @@ function appendTokenBar(text) {
     `<div class="flex items-center gap-1.5 px-1 py-0.5 text-[10px] font-mono text-base-content/30 select-none">
        <span class="text-base-content/20">◈</span>${esc(text)}
      </div>`);
-  msgs.scrollTop = msgs.scrollHeight;
+  stickBottom(msgs);
 }
 
 // Called when loading history from JSONL (usage keys use snake_case from file)
@@ -322,14 +335,14 @@ function appendStreamBubble(role) {
     : 'text-[#c9d1d9]';
   msgs.insertAdjacentHTML('beforeend',
     `<div class="mx-2 rounded-lg bg-[#0d1117] border border-base-300 px-3 py-2 text-sm font-mono ${cls} whitespace-pre-wrap break-words"></div>`);
-  msgs.scrollTop = msgs.scrollHeight;
+  stickBottom(msgs);
   return msgs.lastElementChild;
 }
 
 function appendToStreamBubble(el, text) {
   if (!el) return;
   el.textContent += text;
-  el.closest('#messages').scrollTop = 999999;
+  stickBottom(el.closest('#messages'));
 }
 
 export function renderToolUse(block) {
@@ -350,7 +363,7 @@ export function renderToolUse(block) {
                   font-mono text-[11px] text-[#c9d1d9] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto">${esc(inputStr)}</div>
     </div>
   </div>`);
-  msgs.scrollTop = msgs.scrollHeight;
+  stickBottom(msgs);
 }
 
 function renderPermissionRequest(msg) {
@@ -376,6 +389,14 @@ function renderMarkdown(text) {
   try { return marked.parse(text, { breaks: true, gfm: true }); } catch { return esc(text); }
 }
 
+// Syntax-highlight any code blocks inside a freshly-inserted element.
+function highlightCode(root) {
+  if (!root || typeof hljs === 'undefined') return;
+  root.querySelectorAll('pre code:not(.hljs)').forEach(el => {
+    try { hljs.highlightElement(el); } catch {}
+  });
+}
+
 // ── Init (called after HTML is in DOM) ────────────────────────────────────────
 export function initChat() {
   // Processing state → send/stop buttons + typing indicator
@@ -390,7 +411,7 @@ export function initChat() {
     if (val && !existing) {
       msgs.insertAdjacentHTML('beforeend',
         '<div id="typing-indicator" class="flex justify-start px-2"><div class="flex items-center gap-1.5 rounded-2xl rounded-tl-sm px-3 py-2 bg-base-200 text-xs text-base-content/40"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div></div>');
-      msgs.scrollTop = msgs.scrollHeight;
+      stickBottom(msgs);
     } else if (!val) existing?.remove();
   });
 
@@ -407,11 +428,34 @@ export function initChat() {
     el.closest('.perm-banner')?.remove();
   });
 
-  // Tool card expand/collapse
+  // Tool card expand/collapse — keep the clicked card anchored, don't jump to bottom
   delegate.on('click', '.tool-card', (e, el) => {
+    const msgs = $('messages');
+    const before = el.getBoundingClientRect().top;
     el.classList.toggle('open');
-    $('messages')?.scrollTo({ top: 999999 });
+    // Preserve the card's on-screen position after layout changes
+    if (msgs) {
+      const after = el.getBoundingClientRect().top;
+      msgs.scrollTop += after - before;
+    }
   });
+
+  // Floating jump-to-top / jump-to-bottom buttons
+  const msgsEl = $('messages');
+  const topBtn = $('scroll-top-btn'), botBtn = $('scroll-bottom-btn');
+  if (msgsEl && topBtn && botBtn) {
+    const updateNav = () => {
+      const canScroll = msgsEl.scrollHeight - msgsEl.clientHeight > 200;
+      topBtn.classList.toggle('hidden', !canScroll || msgsEl.scrollTop < 200);
+      botBtn.classList.toggle('hidden', !canScroll || atBottom(msgsEl));
+    };
+    msgsEl.addEventListener('scroll', updateNav, { passive: true });
+    new ResizeObserver(updateNav).observe(msgsEl);
+    new MutationObserver(updateNav).observe(msgsEl, { childList: true, subtree: true });
+    topBtn.addEventListener('click', () => msgsEl.scrollTo({ top: 0, behavior: 'smooth' }));
+    botBtn.addEventListener('click', () => msgsEl.scrollTo({ top: msgsEl.scrollHeight, behavior: 'smooth' }));
+    updateNav();
+  }
 
   // Long message expand/collapse
   delegate.on('click', '.msg-expand-btn', (e, el) => {

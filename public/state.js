@@ -6,6 +6,7 @@ export const workspacesData  = signal([]);
 export const sessionFilter  = signal(null);   // cwd to filter by
 export const sessionSearch  = signal('');
 export const sessionSort    = signal('time'); // 'time' | 'project'
+export const expandedFolders = signal(new Set()); // cwd paths currently expanded in the session list
 export const currentProject = signal(null);   // { id, name, path } | null
 export const currentTab     = signal('chat');
 export const isProcessing   = signal(false);

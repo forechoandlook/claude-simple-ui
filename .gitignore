@@ -5,3 +5,5 @@ mini-react
 .env.example
 .jwt_secret
 tmp
+.workspaces.json
+.credentials.json
