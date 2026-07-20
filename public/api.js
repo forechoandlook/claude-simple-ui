@@ -7,7 +7,7 @@ function isHubLocalPath(path) {
   if (p === '/api/hub' || p === '/api/machines') return true;
   if (p.startsWith('/api/auth/')) return true;
   if (p === '/api/sessions' || p === '/api/projects' || p === '/api/activity') return true;
-  // GET /api/sessions/meta is aggregated; PUT is proxied (needs machine)
+  if (p === '/api/sessions/meta') return true; // GET aggregate; PUT still adds X-Machine-Id below
   return false;
 }
 
@@ -18,9 +18,14 @@ export async function api(method, path, body, signal, opts = {}) {
     ...(ctx.token ? { Authorization: `Bearer ${ctx.token}` } : {}),
   };
 
-  const local = isHubLocalPath(path) && method === 'GET';
-  const metaPut = path.split('?')[0] === '/api/sessions/meta' && method !== 'GET';
-  if (hubMode.peek() && (!local || metaPut) && machineId) {
+  const p0 = path.split('?')[0];
+  const hubLocalGet = isHubLocalPath(path) && method === 'GET';
+  const needsMachine = hubMode.peek() && !hubLocalGet && machineId;
+  if (needsMachine) {
+    headers['X-Machine-Id'] = machineId;
+  }
+  // session meta PUT must go to the selected machine
+  if (hubMode.peek() && p0 === '/api/sessions/meta' && method !== 'GET' && machineId) {
     headers['X-Machine-Id'] = machineId;
   }
 

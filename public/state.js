@@ -142,6 +142,11 @@ export const filteredSessions = computed(() => {
     : sessionsData.value;
 
   if (filter) list = list.filter(s => s.cwd === filter || s.configDir === filter);
+  // Hub: only show sessions on the currently selected machine
+  const mid = selectedMachineId.value;
+  if (hubMode.value && mid) {
+    list = list.filter(s => !s.machineId || s.machineId === mid);
+  }
   list = list.filter(s => matchesAgentFilter(s, aFilter) && matchesTimeRange(s, days));
   if (favOnly) {
     list = list.filter(s => metaMap?.[metaKey(s.agent, s.sessionId, s.machineId)]?.favorite);
@@ -199,12 +204,25 @@ export const ctx = {
   token:       localStorage.getItem('token'),
   sessionId:   null,
   agent:       null,
-  machineId:   localStorage.getItem('machineId') || null, // hub mode: which edge server
+  machineId:   null, // hub: set via setSelectedMachine / picker
   ws:          null,
   shellBubble: null,
   configDir:   null,
 };
 
+/** Select edge machine (hub). Keeps signal + ctx + localStorage in sync. */
+export function setSelectedMachine(id) {
+  const mid = id || null;
+  selectedMachineId.value = mid;
+  ctx.machineId = mid;
+  if (mid) localStorage.setItem('machineId', mid);
+  else localStorage.removeItem('machineId');
+}
+
 /** Hub mode: single WebUI, many edge machines (set after /api/hub probe). */
 export const hubMode = signal(false);
 export const machinesList = signal([]);
+/** Currently selected edge machine (hub mode). Also mirrored on ctx.machineId for api/ws. */
+export const selectedMachineId = signal(null);
+/** Hub: user finished machine picker after login. */
+export const hubMachineReady = signal(false);

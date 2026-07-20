@@ -6,7 +6,7 @@ import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort
          sidebarView, agentFilter, timeRange, activityHits, activityLoading,
          chatDensity, setChatDensity,
          sessionMetaMap, favoritesOnly, LOW_TURN_THRESHOLD, metaKey, getSessionMeta,
-         hubMode, machinesList,
+         hubMode, machinesList, hubMachineReady, selectedMachineId, setSelectedMachine,
          AGENT_LABELS, AGENT_MODELS, AGENT_DEFAULT_MODEL, ctx } from './state.js';
 import { api, probeHub } from './api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
@@ -44,12 +44,28 @@ const AppShell = () => `
       <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
       <span id="btn-home" class="font-semibold text-sm hidden sm:inline cursor-pointer hover:text-primary transition-colors select-none">🤖 Agent UI</span>
       <span class="text-base-300 hidden sm:inline">/</span>
+      <select id="topbar-machine" class="select select-xs select-bordered font-mono text-xs max-w-[10rem] hidden"
+              title="Current edge machine"></select>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
       <div class="flex gap-2">
+        <button id="btn-switch-machine" class="btn btn-ghost btn-xs border border-base-300 hidden" title="Switch machine">机器</button>
         <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ New</button>
         <button id="btn-theme"        class="btn btn-ghost btn-xs border border-base-300">🌙</button>
         <button id="btn-settings"    class="btn btn-ghost btn-xs border border-base-300">⚙️</button>
         <button id="btn-logout"      class="btn btn-ghost btn-xs border border-base-300">Sign out</button>
+      </div>
+    </div>
+    <!-- Hub: pick a machine after login (before using the app) -->
+    <div id="machine-picker" class="hidden fixed inset-0 z-[60] bg-base-100 flex items-center justify-center p-4">
+      <div class="w-full max-w-md">
+        <h2 class="text-xl font-bold mb-1">选择机器</h2>
+        <p class="text-sm text-base-content/55 mb-4">多机中心模式：请先选择一台业务机，之后的 session / 聊天 / 文件都在该机器上。</p>
+        <div id="machine-picker-list" class="flex flex-col gap-2 mb-4"></div>
+        <p id="machine-picker-empty" class="text-sm text-base-content/40 hidden">暂无在线机器。请在业务机上运行 <code class="text-xs">npm run client</code> 后点刷新。</p>
+        <div class="flex items-center gap-2">
+          <button id="btn-refresh-machines" class="btn btn-ghost btn-sm border border-base-300">↻ 刷新</button>
+          <span id="machine-picker-status" class="text-xs text-base-content/40"></span>
+        </div>
       </div>
     </div>
     <div class="flex flex-1 overflow-hidden relative">
@@ -900,19 +916,17 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId) {
     s.sessionId === sid && (!machineId || s.machineId === machineId || !s.machineId)
   );
   const resolvedAgent = agent || fromList?.agent || 'claude';
-  const resolvedMachine = machineId || fromList?.machineId || null;
+  // Prefer explicit machine, then session meta, then currently selected hub machine
+  const resolvedMachine = machineId || fromList?.machineId || selectedMachineId.peek() || null;
 
-  // Switch edge machine (hub): reconnect WS so chat runs on the right host
-  if (resolvedMachine && resolvedMachine !== ctx.machineId) {
-    ctx.machineId = resolvedMachine;
-    localStorage.setItem('machineId', resolvedMachine);
+  if (hubMode.peek() && resolvedMachine && resolvedMachine !== selectedMachineId.peek()) {
+    setSelectedMachine(resolvedMachine);
     try { ctx.ws?.close(); } catch {}
     ctx.ws = null;
-  } else if (!resolvedMachine && ctx.machineId && !hubMode.peek()) {
-    // keep
-  } else if (resolvedMachine) {
-    ctx.machineId = resolvedMachine;
-    localStorage.setItem('machineId', resolvedMachine);
+  } else if (resolvedMachine && resolvedMachine !== ctx.machineId) {
+    setSelectedMachine(resolvedMachine);
+    try { ctx.ws?.close(); } catch {}
+    ctx.ws = null;
   }
 
   ctx.sessionId = sid;
@@ -1183,13 +1197,116 @@ async function saveSessionNotes(sessionId, agent, notes) {
   return true;
 }
 
+async function refreshMachinesList() {
+  try {
+    const list = await api('GET', '/api/machines');
+    machinesList.value = Array.isArray(list) ? list : [];
+  } catch {
+    try {
+      const hub = await probeHub();
+      if (hub?.machines) machinesList.value = hub.machines;
+    } catch { /* ignore */ }
+  }
+  return machinesList.peek() || [];
+}
+
+function renderMachinePickerList() {
+  const listEl = $('machine-picker-list');
+  const emptyEl = $('machine-picker-empty');
+  if (!listEl) return;
+  const ms = machinesList.peek() || [];
+  if (!ms.length) {
+    listEl.innerHTML = '';
+    emptyEl?.classList.remove('hidden');
+    return;
+  }
+  emptyEl?.classList.add('hidden');
+  listEl.innerHTML = ms.map(m => {
+    const online = m.online !== false;
+    const meta = [m.hostname, m.platform].filter(Boolean).join(' · ');
+    return `
+      <button type="button" class="machine-pick-card w-full text-left px-4 py-3 rounded-xl border border-base-300
+              hover:border-primary hover:bg-primary/5 transition-colors ${online ? '' : 'opacity-50'}"
+              data-pick-machine="${esc(m.id)}" ${online ? '' : 'disabled'}>
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full flex-shrink-0 ${online ? 'bg-success' : 'bg-error'}"></span>
+          <span class="font-semibold text-sm font-mono">${esc(m.id)}</span>
+        </div>
+        ${meta ? `<div class="text-xs text-base-content/45 mt-1 pl-4">${esc(meta)}</div>` : ''}
+      </button>`;
+  }).join('');
+}
+
+function showMachinePicker() {
+  const el = $('machine-picker');
+  if (!el) return;
+  el.classList.remove('hidden');
+  hubMachineReady.value = false;
+  renderMachinePickerList();
+  const status = $('machine-picker-status');
+  if (status) status.textContent = `${(machinesList.peek() || []).length} online`;
+}
+
+function hideMachinePicker() {
+  $('machine-picker')?.classList.add('hidden');
+  hubMachineReady.value = true;
+}
+
+function syncTopbarMachine() {
+  const sel = $('topbar-machine');
+  const btn = $('btn-switch-machine');
+  if (!hubMode.peek()) {
+    sel?.classList.add('hidden');
+    btn?.classList.add('hidden');
+    return;
+  }
+  sel?.classList.remove('hidden');
+  btn?.classList.remove('hidden');
+  if (!sel) return;
+  const ms = machinesList.peek() || [];
+  const cur = selectedMachineId.peek() || '';
+  sel.innerHTML = ms.map(m =>
+    `<option value="${esc(m.id)}" ${m.id === cur ? 'selected' : ''}>${esc(m.id)}</option>`
+  ).join('') || '<option value="">(no machines)</option>';
+  if (cur) sel.value = cur;
+}
+
+/** Enter hub app after user picks a machine. */
+async function enterMachine(machineId) {
+  if (!machineId) return;
+  const switching = selectedMachineId.peek() && selectedMachineId.peek() !== machineId;
+  setSelectedMachine(machineId);
+  hideMachinePicker();
+  syncTopbarMachine();
+
+  if (switching) {
+    // Leaving previous machine context
+    try { ctx.ws?.close(); } catch {}
+    ctx.ws = null;
+    ctx.sessionId = null;
+    batch(() => {
+      currentProject.value = null;
+      sessionFilter.value = null;
+      viewingFile.value = null;
+    });
+    goHome();
+  }
+
+  const bar = $('topbar-project');
+  if (bar && (!currentProject.peek())) {
+    bar.textContent = `Machine · ${machineId}`;
+  }
+
+  await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
+}
+
 export async function showApp() {
   $('auth-screen').style.display = 'none';
   const app = $('app');
   app.classList.remove('hidden');
   app.style.display = 'flex';
-  
-  if (location.hash.startsWith('#/session/')) {
+
+  if (location.hash.startsWith('#/session/') && !hubMode.peek()) {
     const welcome = $('welcome');
     if (welcome) welcome.classList.add('hidden');
     const pv = $('project-view');
@@ -1203,17 +1320,21 @@ export async function showApp() {
   const hub = await probeHub();
   if (hub) {
     machinesList.value = hub.machines || [];
-    const subtitle = $('auth-subtitle');
-    // leave auth as-is; topbar hint after login
   }
-  await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
+
   if (hubMode.peek()) {
-    const n = machinesList.peek()?.length || 0;
-    const bar = $('topbar-project');
-    if (bar && bar.textContent === 'Select a session') {
-      bar.textContent = n ? `Hub · ${n} machine(s)` : 'Hub · no machines online';
-    }
+    // Always pick machine after login in hub mode
+    setSelectedMachine(null);
+    hubMachineReady.value = false;
+    await refreshMachinesList();
+    showMachinePicker();
+    // Load sessions after pick (enterMachine); still warm meta cache
+    loadSessionMetaMap().catch(() => {});
+    syncTopbarMachine();
+    return;
   }
+
+  await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -1309,15 +1430,19 @@ function openNewSessionModal() {
   const mwrap = $('new-session-machine-wrap');
   const msel = $('new-session-machine');
   if (mwrap && msel) {
+    // Machine already chosen at login; still show locked selection for clarity
     if (hubMode.peek()) {
       mwrap.style.display = '';
       const ms = machinesList.peek() || [];
+      const cur = selectedMachineId.peek() || '';
       msel.innerHTML = ms.length
         ? ms.map(m => `<option value="${esc(m.id)}">${esc(m.id)}${m.hostname ? ' — ' + esc(m.hostname) : ''}</option>`).join('')
         : '<option value="">(no machines online)</option>';
-      if (ctx.machineId) msel.value = ctx.machineId;
+      if (cur) msel.value = cur;
+      msel.disabled = true;
     } else {
       mwrap.style.display = 'none';
+      if (msel) msel.disabled = false;
     }
   }
   updateNewSessionAgentUI();
@@ -1342,16 +1467,16 @@ async function startNewSession() {
 
   if (!rawPath) { errEl.textContent = 'Working directory is required'; errEl.classList.remove('hidden'); return; }
 
-  // Hub: new session must target an online edge machine
+  // Hub: new session uses currently selected machine
   if (hubMode.peek()) {
-    const mid = $('new-session-machine')?.value || ctx.machineId || machinesList.peek()?.[0]?.id;
+    const mid = selectedMachineId.peek() || $('new-session-machine')?.value || machinesList.peek()?.[0]?.id;
     if (!mid) {
-      errEl.textContent = 'No edge machine online — start client.js on a host first';
+      errEl.textContent = '请先选择一台机器';
       errEl.classList.remove('hidden');
+      showMachinePicker();
       return;
     }
-    ctx.machineId = mid;
-    localStorage.setItem('machineId', mid);
+    setSelectedMachine(mid);
   }
 
   try {
@@ -1707,7 +1832,34 @@ export function initShell() {
   delegate.on('keydown', '#new-session-path', e => { if (e.key === 'Enter') startNewSession(); });
   delegate.on('click', '#send-btn',        sendMessage);
   delegate.on('click', '#stop-btn',        stopProcessing);
-  delegate.on('click', '#btn-logout',      () => { ctx.token = null; localStorage.removeItem('token'); location.reload(); });
+  delegate.on('click', '#btn-logout', () => {
+    ctx.token = null;
+    localStorage.removeItem('token');
+    setSelectedMachine(null);
+    hubMachineReady.value = false;
+    location.reload();
+  });
+
+  // Hub machine picker
+  delegate.on('click', '[data-pick-machine]', async (_, el) => {
+    await enterMachine(el.dataset.pickMachine);
+  });
+  delegate.on('click', '#btn-refresh-machines', async () => {
+    const st = $('machine-picker-status');
+    if (st) st.textContent = '刷新中…';
+    await refreshMachinesList();
+    renderMachinePickerList();
+    if (st) st.textContent = `${(machinesList.peek() || []).length} online`;
+    syncTopbarMachine();
+  });
+  delegate.on('click', '#btn-switch-machine', async () => {
+    await refreshMachinesList();
+    showMachinePicker();
+  });
+  delegate.on('change', '#topbar-machine', async (_, el) => {
+    if (!el.value || el.value === selectedMachineId.peek()) return;
+    await enterMachine(el.value);
+  });
 
   // Project Goal + Notes
   delegate.on('click', '#btn-edit-project-notes, #project-goal-text, #project-notes-text', () => {

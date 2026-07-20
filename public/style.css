@@ -536,6 +536,19 @@
   border: 1px solid color-mix(in oklch, var(--color-warning) 35%, transparent);
 }
 .session-note-dot { font-size: 10px; opacity: 0.85; }
+
+/* Hub machine picker */
+#machine-picker {
+  background: color-mix(in oklch, var(--color-base-100) 92%, black);
+}
+.machine-pick-card {
+  background: color-mix(in oklch, var(--color-base-content) 3%, var(--color-base-100));
+  cursor: pointer;
+}
+.machine-pick-card:disabled {
+  cursor: not-allowed;
+}
+
 .line-clamp-2 {
   display: -webkit-box;
   -webkit-line-clamp: 2;

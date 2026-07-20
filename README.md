@@ -151,9 +151,9 @@ MACHINE_TOKEN=shared-secret MACHINE_ID=build-b \
 
 In hub mode the UI:
 
-- Merges sessions from all edges (`@machineId` on rows)
-- Routes chat / files / git / shell to the machine that owns the session
-- Asks which machine to use for **New Session**
+- **After login, you must pick a machine** (full-screen picker); top bar can switch later
+- Session list is filtered to that machine
+- Routes chat / files / git / shell to the selected machine
 
 An edge may still run `node server.js` for a **local-only** UI on that host (independent of the hub).
 
