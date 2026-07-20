@@ -155,11 +155,16 @@ export function initShell(opts = {}) {
     syncSidebarChrome();
   });
 
-  // Only paint calendar when welcome is actually visible (prevents work + flash on restore)
+  // Only paint calendar when welcome is actually visible (never during boot-restore)
   effect(() => {
     const sessions = filteredSessions.value;
     const welcome = $('welcome');
-    if (!welcome || welcome.classList.contains('hidden') || welcome.style.display === 'none') return;
+    if (!welcome) return;
+    if (document.documentElement.classList.contains('boot-restore')) return;
+    if (document.documentElement.classList.contains('boot-pending')) return;
+    if (welcome.classList.contains('hidden') || welcome.style.display === 'none') return;
+    // Avoid painting empty calendar then repainting — wait until we have data or settled home
+    if (!Array.isArray(sessions)) return;
     updateDashboard(sessions);
   });
 

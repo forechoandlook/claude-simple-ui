@@ -70,15 +70,23 @@ export function goHome() {
   ctx.sessionId = null;
   syncMachinePathHints(null);
 
+  // Leaving session restore mode — calendar is allowed again
+  document.documentElement.classList.remove('boot-restore');
+
   const topbar = $('topbar-project');
   if (topbar) topbar.textContent = 'Select a session';
   const welcome = $('welcome');
   if (welcome) {
     welcome.classList.remove('hidden');
-    updateDashboard(filteredSessions.peek());
+    welcome.style.display = '';
+    const sessions = filteredSessions.peek();
+    if (Array.isArray(sessions)) updateDashboard(sessions);
   }
   const pv = $('project-view');
-  if (pv) pv.classList.add('hidden');
+  if (pv) {
+    pv.classList.add('hidden');
+    pv.style.display = 'none';
+  }
   setHash('/');
 }
 

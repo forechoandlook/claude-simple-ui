@@ -2,7 +2,49 @@
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
-  <script>document.documentElement.setAttribute('data-theme',localStorage.getItem('theme')||'dark')</script>
+  <!-- FOUC / calendar flash: decide before first paint -->
+  <script>
+  (function () {
+    try {
+      var theme = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', theme);
+      var token = localStorage.getItem('token');
+      var hash = location.hash || '';
+      var restore = !!(token && /^#\/session\//.test(hash));
+      document.documentElement.classList.add('boot-pending');
+      if (restore) document.documentElement.classList.add('boot-restore');
+      if (token) document.documentElement.classList.add('boot-authed');
+    } catch (e) {
+      document.documentElement.classList.add('boot-pending');
+    }
+  })();
+  </script>
+  <style>
+    /* Hide app tree until JS has built the correct first screen */
+    html.boot-pending #root {
+      visibility: hidden !important;
+    }
+    html.boot-ready #root {
+      visibility: visible !important;
+    }
+    /* Session deep-link: never show welcome calendar during boot */
+    html.boot-restore #welcome {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+    }
+    html.boot-restore #project-view {
+      display: flex !important;
+      flex-direction: column !important;
+      flex: 1 1 0 !important;
+      min-height: 0 !important;
+      overflow: hidden !important;
+    }
+    html.boot-restore #auth-screen,
+    html.boot-authed #auth-screen {
+      display: none !important;
+    }
+  </style>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <title>Claude Code</title>
   <link href="https://cdn.jsdelivr.net/npm/daisyui@5/daisyui.css" rel="stylesheet">
@@ -10,7 +52,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
   <link id="hljs-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/highlight.min.js"></script>
-  <link rel="stylesheet" href="style.css?v=md-color-2">
+  <link rel="stylesheet" href="style.css?v=boot-1">
 </head>
 <body class="h-dvh overflow-hidden flex flex-col bg-base-100 text-base-content">
   <div id="root" class="flex flex-col flex-1 overflow-hidden"></div>
