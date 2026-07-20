@@ -139,7 +139,10 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
   // Switch to target tab BEFORE history (files/git/shell usable immediately)
   clearMessages();
   switchTab(targetTab);
-  sessionsData.value = [...sessionsData.peek()];
+  {
+    const cur = sessionsData.peek();
+    sessionsData.value = Array.isArray(cur) ? [...cur] : [];
+  }
 
   setLastSessionContext({
     sessionId: sid,

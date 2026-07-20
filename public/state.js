@@ -126,6 +126,14 @@ function matchesSearch(s, search) {
   return hay.includes(search);
 }
 
+function asSessionArray(v) {
+  if (Array.isArray(v)) return v;
+  // Hub/API/cache may occasionally yield an object or null
+  if (v && Array.isArray(v.results)) return v.results;
+  if (v && Array.isArray(v.sessions)) return v.sessions;
+  return [];
+}
+
 /** Sessions after local filters (agent / time / workspace / text / favorites). */
 export const filteredSessions = computed(() => {
   const filter = sessionFilter.value;
@@ -138,21 +146,21 @@ export const filteredSessions = computed(() => {
   // When deep activity results are present and user is searching, prefer those
   const hits = activityHits.value;
   let list = (hits?.results?.length && search)
-    ? hits.results
-    : sessionsData.value;
+    ? asSessionArray(hits.results)
+    : asSessionArray(sessionsData.value);
 
-  if (filter) list = list.filter(s => s.cwd === filter || s.configDir === filter);
+  if (filter) list = list.filter(s => s && (s.cwd === filter || s.configDir === filter));
   // Hub: only show sessions on the currently selected machine
   const mid = selectedMachineId.value;
   if (hubMode.value && mid) {
-    list = list.filter(s => !s.machineId || s.machineId === mid);
+    list = list.filter(s => s && (!s.machineId || s.machineId === mid));
   }
-  list = list.filter(s => matchesAgentFilter(s, aFilter) && matchesTimeRange(s, days));
+  list = list.filter(s => s && matchesAgentFilter(s, aFilter) && matchesTimeRange(s, days));
   if (favOnly) {
-    list = list.filter(s => metaMap?.[metaKey(s.agent, s.sessionId, s.machineId)]?.favorite);
+    list = list.filter(s => s && metaMap?.[metaKey(s.agent, s.sessionId, s.machineId)]?.favorite);
   }
   if (search && !(hits?.results && hits.q === search)) {
-    list = list.filter(s => matchesSearch(s, search));
+    list = list.filter(s => s && matchesSearch(s, search));
   }
 
   list = [...list].sort((a, b) => {
@@ -172,9 +180,10 @@ export const filteredSessions = computed(() => {
 
 /** Project groups derived from filtered sessions. */
 export const projectGroups = computed(() => {
-  const list = filteredSessions.value;
+  const list = asSessionArray(filteredSessions.value);
   const map = new Map();
   for (const s of list) {
+    if (!s) continue;
     // Hub: same cwd on different machines are different projects
     const key = s.machineId ? `${s.machineId}::${s.cwd || '(no path)'}` : (s.cwd || '(no path)');
     if (!map.has(key)) {

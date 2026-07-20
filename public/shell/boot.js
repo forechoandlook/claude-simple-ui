@@ -124,7 +124,10 @@ export async function showApp(opts = {}) {
 
   if (deep?.id) {
     // Apply cache if any, then resume without waiting for network sessions
-    await getCachedSessions().then(c => { if (c) sessionsData.value = c; }).catch(() => {});
+    await getCachedSessions().then(c => {
+      if (Array.isArray(c)) sessionsData.value = c;
+      else if (c && Array.isArray(c.sessions)) sessionsData.value = c.sessions;
+    }).catch(() => {});
     const s = sessionsData.peek().find(x => x.sessionId === deep.id)
       || (last?.sessionId === deep.id ? last : null);
     await resumeSession(

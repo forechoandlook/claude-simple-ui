@@ -13,13 +13,20 @@ import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWor
 import { formatTime, agentBadge, agentCountPills, shortPath } from './util.js';
 
 
+function normalizeSessions(v) {
+  if (Array.isArray(v)) return v;
+  if (v && Array.isArray(v.results)) return v.results;
+  if (v && Array.isArray(v.sessions)) return v.sessions;
+  return [];
+}
+
 /** @param {{ waitFresh?: boolean }} opts waitFresh=false → paint cache first, refresh in bg */
 export async function loadAllSessions({ waitFresh = true } = {}) {
-  const cached = await getCachedSessions();
-  if (cached) {
+  const cached = normalizeSessions(await getCachedSessions());
+  if (cached.length) {
     // Hub: if we already selected a machine, prefer cache entries for that machine
     const mid = selectedMachineId.peek();
-    if (hubMode.peek() && mid && Array.isArray(cached)) {
+    if (hubMode.peek() && mid) {
       const filtered = cached.filter(s => !s.machineId || s.machineId === mid);
       sessionsData.value = filtered.length ? filtered : cached;
     } else {
@@ -28,17 +35,17 @@ export async function loadAllSessions({ waitFresh = true } = {}) {
   }
 
   const fetchFresh = async () => {
-    const fresh = await api('GET', '/api/sessions');
+    const fresh = normalizeSessions(await api('GET', '/api/sessions'));
     sessionsData.value = fresh;
     setCachedSessions(fresh);
     return fresh;
   };
 
-  if (waitFresh || !cached) {
+  if (waitFresh || !cached.length) {
     try {
       await fetchFresh();
     } catch (e) {
-      if (!cached) {
+      if (!cached.length) {
         const el = $('session-list');
         if (el) el.innerHTML = `<div class="px-3 py-3 text-xs text-error">${esc(e.message)}</div>`;
       }
