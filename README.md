@@ -146,6 +146,8 @@ API Key 存在服务端 `.ai_config.json`（已 gitignore）。配置入口：Ag
 
 删除会话会整目录删除。旧版 `session.json`、`vlm.jsonl`、`vlm/*.json`、全局 `.ai/vlm/` 会自动迁移。
 
+设计细节（图片 / VLM / Resume / reasoning 不进 messages）：见 **[docs/meta-agent-design.md](docs/meta-agent-design.md)**。
+
 ## Multi-machine (optional)
 
 Only needed when sessions live on **several hosts** and you want **one public WebUI**.
