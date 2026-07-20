@@ -34,6 +34,38 @@ export const favoritesOnly  = signal(localStorage.getItem('favoritesOnly') === '
 /** Sessions with this many user turns or fewer get a “thin” badge */
 export const LOW_TURN_THRESHOLD = 2;
 
+// Chat display density: clean (tools batched/hidden) | normal | full (tools expanded-friendly)
+export const chatDensity = signal(localStorage.getItem('chatDensity') || 'normal');
+
+// Hub signals — must be declared BEFORE filteredSessions (uses them in the computed)
+/** Hub mode: single WebUI, many edge machines (set after /api/hub probe). */
+export const hubMode = signal(false);
+export const machinesList = signal([]);
+/** Currently selected edge machine (hub mode). Also mirrored on ctx.machineId for api/ws. */
+export const selectedMachineId = signal(null);
+/** Hub: user finished machine picker after login. */
+export const hubMachineReady = signal(false);
+
+// Mutable runtime — passed by reference so all modules see mutations
+export const ctx = {
+  token:       localStorage.getItem('token'),
+  sessionId:   null,
+  agent:       null,
+  machineId:   null, // hub: set via setSelectedMachine / picker
+  ws:          null,
+  shellBubble: null,
+  configDir:   null,
+};
+
+/** Select edge machine (hub). Keeps signal + ctx + localStorage in sync. */
+export function setSelectedMachine(id) {
+  const mid = id || null;
+  selectedMachineId.value = mid;
+  ctx.machineId = mid;
+  if (mid) localStorage.setItem('machineId', mid);
+  else localStorage.removeItem('machineId');
+}
+
 export function metaKey(agent, sessionId, machineId) {
   const base = `${agent || 'claude'}:${sessionId}`;
   // Hub aggregates as machineId:agent:sessionId
@@ -47,9 +79,6 @@ export function getSessionMeta(agent, sessionId, machineId) {
   const m = sessionMetaMap.peek()?.[metaKey(agent, sessionId, machineId)];
   return m || { favorite: false, notes: '' };
 }
-
-// Chat display density: clean (tools batched/hidden) | normal | full (tools expanded-friendly)
-export const chatDensity = signal(localStorage.getItem('chatDensity') || 'normal');
 
 export function setChatDensity(d) {
   const v = ['clean', 'normal', 'full'].includes(d) ? d : 'normal';
@@ -207,31 +236,3 @@ export const projectGroups = computed(() => {
   }
   return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 });
-
-// Mutable runtime — passed by reference so all modules see mutations
-export const ctx = {
-  token:       localStorage.getItem('token'),
-  sessionId:   null,
-  agent:       null,
-  machineId:   null, // hub: set via setSelectedMachine / picker
-  ws:          null,
-  shellBubble: null,
-  configDir:   null,
-};
-
-/** Select edge machine (hub). Keeps signal + ctx + localStorage in sync. */
-export function setSelectedMachine(id) {
-  const mid = id || null;
-  selectedMachineId.value = mid;
-  ctx.machineId = mid;
-  if (mid) localStorage.setItem('machineId', mid);
-  else localStorage.removeItem('machineId');
-}
-
-/** Hub mode: single WebUI, many edge machines (set after /api/hub probe). */
-export const hubMode = signal(false);
-export const machinesList = signal([]);
-/** Currently selected edge machine (hub mode). Also mirrored on ctx.machineId for api/ws. */
-export const selectedMachineId = signal(null);
-/** Hub: user finished machine picker after login. */
-export const hubMachineReady = signal(false);
