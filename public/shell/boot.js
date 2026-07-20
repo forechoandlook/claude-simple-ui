@@ -34,11 +34,22 @@ export async function showApp(opts = {}) {
   const deep = opts.deepLink || null;
   const last = getLastSessionContext();
 
-  // Hide welcome early when restoring a session URL
-  if (deep?.id || location.hash.startsWith('#/session/')) {
-    $('welcome')?.classList.add('hidden');
+  // Keep welcome hidden while restoring (prevents calendar flash)
+  const restoring = !!(deep?.id || (location.hash || '').startsWith('#/session/'));
+  if (restoring) {
+    const welcome = $('welcome');
+    if (welcome) {
+      welcome.classList.add('hidden');
+      welcome.style.display = 'none';
+    }
     const pv = $('project-view');
-    if (pv) { pv.classList.remove('hidden'); pv.style.display = 'flex'; }
+    if (pv) {
+      pv.classList.remove('hidden');
+      pv.style.display = 'flex';
+      pv.style.flexDirection = 'column';
+      pv.style.flex = '1';
+      pv.style.minHeight = '0';
+    }
   }
 
   if (hubMode.peek()) {

@@ -21,9 +21,24 @@ export const AuthScreen = () => `
     </div>
   </div>`;
 
-export const AppShell = () => `
+/**
+ * @param {{ restoreSession?: boolean }} [opts]
+ * restoreSession: hide welcome calendar on first paint (deep-link / session restore)
+ */
+export const AppShell = (opts = {}) => {
+  const restore = !!opts.restoreSession;
+  const appHidden = ctx.token ? '' : 'hidden';
+  const appStyle = ctx.token ? 'display:flex' : 'display:none';
+  const welcomeCls = restore
+    ? 'hidden flex-1 flex-col items-center justify-start overflow-y-auto p-4 md:p-6 gap-5'
+    : 'flex-1 flex flex-col items-center justify-start overflow-y-auto p-4 md:p-6 gap-5';
+  const projectCls = restore
+    ? 'flex flex-col flex-1 overflow-hidden min-h-0'
+    : 'hidden flex-col flex-1 overflow-hidden min-h-0';
+  const projectStyle = restore ? 'display:flex;flex-direction:column;flex:1;min-height:0' : '';
+  return `
   <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-[9]"></div>
-  <div id="app" class="${ctx.token ? '' : 'hidden'} flex-col flex-1 overflow-hidden" ${ctx.token ? 'style="display:flex"' : 'style="display:none"'}>
+  <div id="app" class="${appHidden} flex-col flex-1 overflow-hidden" style="${appStyle}">
     <div class="flex items-center gap-2 px-3 bg-base-200 border-b border-base-300 flex-shrink-0" style="height:44px">
       <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
       <span id="btn-home" class="font-semibold text-sm hidden sm:inline cursor-pointer hover:text-primary transition-colors select-none">🤖 Agent UI</span>
@@ -110,7 +125,7 @@ export const AppShell = () => `
           style="left:0;top:50%;transform:translateY(-50%)">◀</button>
       </div>
       <div id="main" class="flex-1 flex flex-col overflow-hidden min-w-0">
-        <div id="welcome" class="flex-1 flex flex-col items-center justify-start overflow-y-auto p-4 md:p-6 gap-5">
+        <div id="welcome" class="${welcomeCls}">
           <div class="max-w-4xl w-full text-center flex flex-col items-center gap-2 mt-2 md:mt-4">
             <h2 class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent select-none">🤖 Agent UI</h2>
             <p class="text-sm text-base-content/65 max-w-md">Claude · Codex · Grok — Select a session from the sidebar or click a day on the calendar to view activity.</p>
@@ -175,7 +190,7 @@ export const AppShell = () => `
             </div>
           </div>
         </div>
-        <div id="project-view" class="hidden flex-col flex-1 overflow-hidden">
+        <div id="project-view" class="${projectCls}" style="${projectStyle}">
           <div class="flex bg-base-200 border-b border-base-300 flex-shrink-0 overflow-x-auto" style="scrollbar-width:none">
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-primary border-primary"            data-tab="chat">Chat</button>
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="files">Files</button>
@@ -316,3 +331,4 @@ export const AppShell = () => `
     </div>
     <form method="dialog" class="modal-backdrop"><button>close</button></form>
   </dialog>`;
+};

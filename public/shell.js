@@ -86,8 +86,14 @@ async function submitAuth() {
   }
 }
 
+/** First paint: restore session shell (no calendar flash) when hash is a session. */
+export function shouldRestoreSessionOnBoot() {
+  if (!ctx.token) return false;
+  return /^#\/session\//.test(location.hash || '');
+}
+
 // ── Init — render HTML, wire everything up ────────────────────────────────────
-export function initShell() {
+export function initShell(opts = {}) {
   applyTheme(localStorage.getItem('theme') || 'dark');
 
   if (!document.getElementById('xterm-css')) {
@@ -110,9 +116,16 @@ export function initShell() {
     document.head.appendChild(jsFit);
   }
 
+  const restoreSession = opts.restoreSession ?? shouldRestoreSessionOnBoot();
   const root = document.getElementById('root');
   root.style.cssText = 'display:flex;flex-direction:column;flex:1;height:100%';
-  root.innerHTML = AuthScreen() + AppShell();
+  root.innerHTML = AuthScreen() + AppShell({ restoreSession });
+
+  // Avoid sidebar session-list thrashing until first data arrives when restoring
+  if (restoreSession) {
+    const list = $('session-list');
+    if (list) list.innerHTML = '<div class="px-3 py-3 text-[10px] text-base-content/35">Loading sessions…</div>';
+  }
 
   effect(() => {
     const wss = workspacesData.value;
@@ -142,12 +155,12 @@ export function initShell() {
     syncSidebarChrome();
   });
 
+  // Only paint calendar when welcome is actually visible (prevents work + flash on restore)
   effect(() => {
     const sessions = filteredSessions.value;
     const welcome = $('welcome');
-    if (welcome && !welcome.classList.contains('hidden')) {
-      updateDashboard(sessions);
-    }
+    if (!welcome || welcome.classList.contains('hidden') || welcome.style.display === 'none') return;
+    updateDashboard(sessions);
   });
 
   watch(sessionFilter, f => {
