@@ -144,7 +144,8 @@ function handleMachineMessage(msg) {
 
 // ─── Express app ──────────────────────────────────────────────────────────────
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+// Large enough for base64 file previews (office/pdf ≤15MB → ~20MB JSON)
+app.use(express.json({ limit: '25mb' }));
 
 // Machine list API (used by the frontend picker)
 app.get('/api/machines', (req, res) => {

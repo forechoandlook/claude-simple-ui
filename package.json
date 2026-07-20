@@ -6,7 +6,9 @@
     "build": "node build.mjs",
     "start": "NODE_ENV=production node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
-    "serve": "node server.js"
+    "serve": "node server.js",
+    "gateway": "node gateway.js",
+    "client": "node client.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "*",

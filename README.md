@@ -55,12 +55,19 @@ npm install -g @openai/codex
 
 - **Projects** view: group by working directory; show agent mix (CC/CX/GX), last activity title
 - **Recent** timeline: chronological “what did I do” by day
-- Filters: agent (All/Claude/Codex/Grok) + time range (Today / 7d / 14d / 30d / All)
-- Search: metadata (path, title) + **deep content peek** via `GET /api/activity?q=…`
+- Filters: agent (All/Claude/Codex/Grok) + time range (Today / 7d / 14d / 30d / All) + **★ Fav**
+- Search: metadata (path, title, session notes) + **deep content peek** via `GET /api/activity?q=…`
 - Double-click a project header to open that cwd
 - **Session Conversion**: Convert / clone active sessions between Claude Code, Codex, and Grok on the fly (retaining conversation context)
-- **Project Notes**: Manage project goals and notes centrally with inline editing in the chat header
+- **Project Goal + Notes**: one-line goal and multi-line notes per project path (stored in `.project_notes.json`)
+- **Session favorites & notes**: star sessions; add per-session notes (`.session_meta.json`)
+- **Thin sessions**: sessions with ≤2 user turns show a `thin·N` badge in the list
 - Session history loads on click; sidebar is resizable
+
+### Files preview
+
+- Text / code: syntax highlighting (highlight.js)
+- **docx / xlsx / pptx / pdf** preview (client-side libraries; binary over base64, ≤15MB)
 
 ### Workspaces
 
@@ -91,11 +98,49 @@ npm install -g @openai/codex
 - Auto-fit responsive terminal resizing (syncs terminal window dimensions dynamically between frontend and backend via PTY ioctls)
 - Easy one-click reconnect and output clear
 
+## Multi-machine (gateway)
+
+Sessions live on the machines that run Claude/Codex/Grok CLIs. If work is split across **machine A** and **machine B**, run a **gateway** on a public host and a **client** agent on each machine:
+
+```
+Browser  ──HTTP/WS──►  gateway.js  ──relay──►  client.js@A  (local server.js + local ~/.claude etc.)
+                              └──relay──►  client.js@B
+```
+
+| Role | Process | Binds | Env |
+|------|---------|-------|-----|
+| Gateway | `npm run gateway` | public `GATEWAY_PORT` (default 8080) | `MACHINE_TOKEN` (shared secret) |
+| Machine | `npm run client` | `127.0.0.1:LOCAL_PORT` (default 13000) | `GATEWAY_URL`, `MACHINE_TOKEN`, `MACHINE_ID` (default hostname) |
+
+Example:
+
+```bash
+# On public VPS
+MACHINE_TOKEN=secret GATEWAY_PORT=8080 npm run gateway
+
+# On laptop A
+MACHINE_TOKEN=secret MACHINE_ID=laptop-a \
+  GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
+
+# On server B
+MACHINE_TOKEN=secret MACHINE_ID=build-b \
+  GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
+```
+
+Open the gateway root URL → **Choose a machine** → full UI is proxied at `/machine/<id>/` (API + chat/shell WebSockets).
+
+Notes:
+
+- Auth, project notes, and session meta are **per machine** (each client has its own data files).
+- CLI tools and session history must exist on that machine.
+- For production, put TLS in front of the gateway (Caddy/nginx) and keep `MACHINE_TOKEN` long/random.
+
 ## Stack
 
 - **Backend**: Node.js + Express + `ws` + `@anthropic-ai/claude-agent-sdk` + Python PTY subprocess helper (no native compilation required)
 - **Frontend**: Vanilla ES Modules + [mini-react](https://github.com/forechoandlook/mini-react) (signals, keyedList, effects) + DaisyUI + Tailwind + xterm.js (local assets)
-- **Storage**: IndexedDB (session cache, 5-min TTL) + JSON files (credentials, workspaces, JWT secret)
+- **Storage**: IndexedDB (session cache, 5-min TTL) + JSON files (credentials, workspaces, project notes, session meta, JWT secret)
+- **Multi-host**: optional `gateway.js` + `client.js` relay
 - **No build step** (dev): browser loads `.js` files directly; optional `npm run build` for dist/
 
 ## Agent backends
