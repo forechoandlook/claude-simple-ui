@@ -507,6 +507,42 @@
   background: white;
 }
 
+/* Session list: favorites + thin (low-turn) markers */
+.session-fav-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: color-mix(in oklch, var(--color-base-content) 35%, transparent);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 1px;
+}
+.session-fav-btn:hover { color: #eab308; }
+.session-fav-btn.is-fav { color: #eab308; }
+.session-row.session-fav { background: color-mix(in oklch, #eab308 6%, transparent); }
+.session-row.session-thin {
+  opacity: 0.88;
+}
+.session-thin-badge {
+  font-size: 9px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0 4px;
+  border-radius: 3px;
+  color: color-mix(in oklch, var(--color-warning) 90%, var(--color-base-content));
+  background: color-mix(in oklch, var(--color-warning) 18%, transparent);
+  border: 1px solid color-mix(in oklch, var(--color-warning) 35%, transparent);
+}
+.session-note-dot { font-size: 10px; opacity: 0.85; }
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 /* Blockquote */
 .md blockquote {
   margin: 0.75em 0;

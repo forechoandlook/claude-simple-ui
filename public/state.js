@@ -27,6 +27,21 @@ export const agentFilter    = signal(localStorage.getItem('agentFilter') || 'all
 export const timeRange      = signal(localStorage.getItem('timeRange') || '14'); // '0'|'1'|'7'|'14'|'30'
 export const activityHits   = signal(null); // null | { q, results, loading, error }
 export const activityLoading = signal(false);
+/** agent:sessionId → { favorite, notes, updatedAt } */
+export const sessionMetaMap = signal({});
+/** Sidebar: show only favorited sessions */
+export const favoritesOnly  = signal(localStorage.getItem('favoritesOnly') === '1');
+/** Sessions with this many user turns or fewer get a “thin” badge */
+export const LOW_TURN_THRESHOLD = 2;
+
+export function metaKey(agent, sessionId) {
+  return `${agent || 'claude'}:${sessionId}`;
+}
+
+export function getSessionMeta(agent, sessionId) {
+  const m = sessionMetaMap.peek()?.[metaKey(agent, sessionId)];
+  return m || { favorite: false, notes: '' };
+}
 
 // Chat display density: clean (tools batched/hidden) | normal | full (tools expanded-friendly)
 export const chatDensity = signal(localStorage.getItem('chatDensity') || 'normal');
@@ -98,19 +113,23 @@ function matchesTimeRange(s, daysStr) {
 
 function matchesSearch(s, search) {
   if (!search) return true;
+  const meta = sessionMetaMap.value?.[metaKey(s.agent, s.sessionId)];
   const hay = [
     s.display, s.cwd, s.projectName, s.agent, s.sessionId, s.snippet,
+    meta?.notes,
   ].filter(Boolean).join(' ').toLowerCase();
   return hay.includes(search);
 }
 
-/** Sessions after local filters (agent / time / workspace / text). */
+/** Sessions after local filters (agent / time / workspace / text / favorites). */
 export const filteredSessions = computed(() => {
   const filter = sessionFilter.value;
   const search = sessionSearch.value.toLowerCase().trim();
   const sort   = sessionSort.value;
   const aFilter = agentFilter.value;
   const days = timeRange.value;
+  const favOnly = favoritesOnly.value;
+  const metaMap = sessionMetaMap.value;
   // When deep activity results are present and user is searching, prefer those
   const hits = activityHits.value;
   let list = (hits?.results?.length && search)
@@ -119,18 +138,25 @@ export const filteredSessions = computed(() => {
 
   if (filter) list = list.filter(s => s.cwd === filter || s.configDir === filter);
   list = list.filter(s => matchesAgentFilter(s, aFilter) && matchesTimeRange(s, days));
+  if (favOnly) {
+    list = list.filter(s => metaMap?.[metaKey(s.agent, s.sessionId)]?.favorite);
+  }
   if (search && !(hits?.results && hits.q === search)) {
     list = list.filter(s => matchesSearch(s, search));
   }
 
-  list = [...list].sort((a, b) =>
-    sort === 'project'
+  list = [...list].sort((a, b) => {
+    // Favorites float to top within the same sort key
+    const fa = metaMap?.[metaKey(a.agent, a.sessionId)]?.favorite ? 1 : 0;
+    const fb = metaMap?.[metaKey(b.agent, b.sessionId)]?.favorite ? 1 : 0;
+    if (fa !== fb) return fb - fa;
+    return sort === 'project'
       ? (a.cwd || '').localeCompare(b.cwd || '') || (b.updatedAt - a.updatedAt)
-      : b.updatedAt - a.updatedAt
-  );
+      : b.updatedAt - a.updatedAt;
+  });
 
   // Cap timeline dump when no filter/search
-  if (!filter && !search) return list.slice(0, 120);
+  if (!filter && !search && !favOnly) return list.slice(0, 120);
   return list;
 });
 

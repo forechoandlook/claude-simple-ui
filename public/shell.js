@@ -5,6 +5,7 @@ import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort
          currentModel, currentEffort, currentPermission, currentAgent, setAgent,
          sidebarView, agentFilter, timeRange, activityHits, activityLoading,
          chatDensity, setChatDensity,
+         sessionMetaMap, favoritesOnly, LOW_TURN_THRESHOLD, metaKey, getSessionMeta,
          AGENT_LABELS, AGENT_MODELS, AGENT_DEFAULT_MODEL, ctx } from './state.js';
 import { api } from './api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
@@ -81,6 +82,7 @@ const AppShell = () => `
             <button data-agent-filter="claude" class="agent-pill">Claude</button>
             <button data-agent-filter="codex" class="agent-pill">Codex</button>
             <button data-agent-filter="grok" class="agent-pill">Grok</button>
+            <button id="btn-fav-filter" class="agent-pill" title="Show only favorites">★ Fav</button>
           </div>
           <div id="search-status" class="hidden text-[10px] text-base-content/40 px-0.5"></div>
         </div>
@@ -167,15 +169,8 @@ const AppShell = () => `
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="memory">🧠 Memory</button>
           </div>
           <div id="tab-chat" class="flex flex-col flex-1 overflow-hidden relative">
-            <div id="project-notes-bar" class="bg-base-200 border-b border-base-300 px-3 py-1.5 text-xs flex justify-between items-center gap-2" style="display:none">
-              <div class="flex-1 truncate">
-                <span class="font-bold text-base-content/40 uppercase mr-1">Project Goal:</span>
-                <span id="project-notes-text" class="text-base-content/75 italic cursor-pointer hover:underline" title="Click to edit">No goals defined yet. Click edit to add a note...</span>
-              </div>
-              <div class="flex items-center gap-1.5 flex-shrink-0">
-                <button id="btn-edit-project-notes" class="btn btn-ghost btn-xs px-1.5 hover:bg-base-300">Edit</button>
-              </div>
-            </div>
+            <div id="project-notes-bar" class="bg-base-200 border-b border-base-300 px-3 py-1.5 text-xs flex flex-col gap-1" style="display:none"></div>
+            <div id="session-notes-bar" class="bg-base-200/80 border-b border-base-300 px-3 py-1 text-xs flex justify-between items-center gap-2" style="display:none"></div>
             <div id="messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
             <div id="scroll-nav" class="absolute right-3 bottom-24 flex flex-col gap-1.5 z-10">
               <button id="scroll-top-btn" class="scroll-fab hidden" title="Jump to top">↑</button>
@@ -590,21 +585,36 @@ function sessionItemHtml(s, { showProject = false } = {}) {
   const title  = s.snippet && sessionSearch.peek()
     ? s.snippet
     : (s.display || s.sessionId.slice(0, 8));
+  const meta = sessionMetaMap.peek()?.[metaKey(s.agent, s.sessionId)] || {};
+  const fav = !!meta.favorite;
+  const hasNote = !!(meta.notes && String(meta.notes).trim());
+  const turns = Number(s.turnCount) || 0;
+  const thin = turns > 0 && turns <= LOW_TURN_THRESHOLD;
   const projectLine = showProject
     ? `<div class="text-[10px] text-base-content/40 font-mono truncate" title="${esc(s.cwd || '')}">${esc(s.projectName || shortPath(s.cwd) || '—')}</div>`
     : '';
-  return `<div class="px-2.5 py-1.5 cursor-pointer hover:bg-base-300 border-l-2
-              ${active ? 'border-primary bg-primary/5' : 'border-transparent'}"
+  const badges = [
+    thin ? `<span class="session-thin-badge" title="Only ${turns} turn${turns === 1 ? '' : 's'}">thin·${turns}</span>` : '',
+    hasNote ? `<span class="session-note-dot" title="${esc(meta.notes)}">📝</span>` : '',
+  ].filter(Boolean).join('');
+  return `<div class="session-row px-2.5 py-1.5 cursor-pointer hover:bg-base-300 border-l-2
+              ${active ? 'border-primary bg-primary/5' : 'border-transparent'} ${fav ? 'session-fav' : ''} ${thin ? 'session-thin' : ''}"
        data-session-id="${esc(s.sessionId)}"
        data-session-cwd="${esc(s.cwd || '')}"
        data-session-config-dir="${esc(s.configDir || '')}"
        data-session-agent="${esc(s.agent || 'claude')}">
     <div class="flex items-start gap-1.5">
+      <button type="button" class="session-fav-btn flex-shrink-0 leading-none mt-0.5 ${fav ? 'is-fav' : ''}"
+              data-fav-toggle="1"
+              data-fav-session-id="${esc(s.sessionId)}"
+              data-fav-session-agent="${esc(s.agent || 'claude')}"
+              title="${fav ? 'Unfavorite' : 'Favorite'}">${fav ? '★' : '☆'}</button>
       ${agentBadge(s.agent)}
       <div class="min-w-0 flex-1">
         <div class="text-[11px] leading-snug truncate ${active ? 'text-primary font-medium' : 'text-base-content/85'}"
              title="${esc(s.display || '')}">${esc(title)}</div>
         ${projectLine}
+        ${badges ? `<div class="flex items-center gap-1 mt-0.5">${badges}</div>` : ''}
       </div>
       <span class="text-[9px] text-base-content/30 flex-shrink-0 mt-0.5">${formatTime(s.updatedAt)}</span>
     </div>
@@ -959,6 +969,7 @@ export async function resumeSession(sid, cwd, configDir, agent) {
     appendSystemMsg(`${label} · ${sid.slice(0,8)}… (history unavailable: ${e.message})`);
   }
   syncHash();
+  renderSessionNotesBar();
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -987,16 +998,17 @@ export async function initAuth() {
   }
 }
 
-let activeNotesText = '';
+let activeProjectGoal = '';
+let activeProjectNotes = '';
 
 async function fetchProjectNotes(rootPath) {
   const bar = $('project-notes-bar');
   if (!bar) return;
-  
+
   try {
     const res = await api('GET', `/api/projects/notes?root=${encodeURIComponent(rootPath)}`);
-    activeNotesText = res.notes || '';
-    
+    activeProjectGoal = res.goal || '';
+    activeProjectNotes = res.notes || '';
     renderProjectNotesDisplayMode();
     bar.style.display = 'flex';
   } catch (err) {
@@ -1008,14 +1020,21 @@ async function fetchProjectNotes(rootPath) {
 function renderProjectNotesDisplayMode() {
   const bar = $('project-notes-bar');
   if (!bar) return;
-  
+
+  const goalText = activeProjectGoal || 'No goal yet — click Edit';
+  const notesText = activeProjectNotes || '';
   bar.innerHTML = `
-    <div class="flex-1 truncate">
-      <span class="font-bold text-base-content/40 uppercase mr-1">Project Goal:</span>
-      <span id="project-notes-text" class="text-base-content/75 italic cursor-pointer hover:underline" title="Click to edit">${esc(activeNotesText || 'No goals defined yet. Click edit to add a note...')}</span>
-    </div>
-    <div class="flex items-center gap-1.5 flex-shrink-0">
-      <button id="btn-edit-project-notes" class="btn btn-ghost btn-xs px-1.5 hover:bg-base-300">Edit</button>
+    <div class="flex items-start gap-2 w-full">
+      <div class="flex-1 min-w-0">
+        <div class="truncate">
+          <span class="font-bold text-base-content/40 uppercase mr-1">Goal:</span>
+          <span id="project-goal-text" class="text-base-content/80 cursor-pointer hover:underline" title="Click to edit">${esc(goalText)}</span>
+        </div>
+        ${notesText
+          ? `<div class="mt-0.5 text-base-content/55 line-clamp-2 whitespace-pre-wrap" id="project-notes-text" title="${esc(notesText)}"><span class="font-bold text-base-content/35 uppercase mr-1">Notes:</span>${esc(notesText)}</div>`
+          : `<div class="mt-0.5 text-base-content/35 italic text-[11px]" id="project-notes-text">No project notes</div>`}
+      </div>
+      <button id="btn-edit-project-notes" class="btn btn-ghost btn-xs px-1.5 hover:bg-base-300 flex-shrink-0">Edit</button>
     </div>
   `;
 }
@@ -1023,20 +1042,113 @@ function renderProjectNotesDisplayMode() {
 function renderProjectNotesEditMode() {
   const bar = $('project-notes-bar');
   if (!bar) return;
-  
+
   bar.innerHTML = `
-    <input id="project-notes-input" type="text" class="input input-xs input-bordered flex-1 text-xs" placeholder="Describe the goal/notes of this project..." value="${esc(activeNotesText)}">
-    <div class="flex items-center gap-1 flex-shrink-0">
-      <button id="btn-save-project-notes" class="btn btn-primary btn-xs px-2">Save</button>
-      <button id="btn-cancel-project-notes" class="btn btn-ghost btn-xs px-2">Cancel</button>
+    <div class="flex flex-col gap-1.5 w-full">
+      <div class="flex items-center gap-2">
+        <span class="text-[10px] font-bold text-base-content/40 uppercase w-12 flex-shrink-0">Goal</span>
+        <input id="project-goal-input" type="text" class="input input-xs input-bordered flex-1 text-xs"
+               placeholder="One-line project goal…" value="${esc(activeProjectGoal)}">
+      </div>
+      <div class="flex items-start gap-2">
+        <span class="text-[10px] font-bold text-base-content/40 uppercase w-12 flex-shrink-0 mt-1">Notes</span>
+        <textarea id="project-notes-input" rows="2" class="textarea textarea-xs textarea-bordered flex-1 text-xs leading-snug"
+                  placeholder="Longer project notes (stack, links, status…)">${esc(activeProjectNotes)}</textarea>
+      </div>
+      <div class="flex items-center gap-1 justify-end">
+        <button id="btn-save-project-notes" class="btn btn-primary btn-xs px-2">Save</button>
+        <button id="btn-cancel-project-notes" class="btn btn-ghost btn-xs px-2">Cancel</button>
+      </div>
     </div>
   `;
-  
-  const input = $('project-notes-input');
-  if (input) {
-    input.focus();
-    input.select();
+
+  $('project-goal-input')?.focus();
+}
+
+async function loadSessionMetaMap() {
+  try {
+    const db = await api('GET', '/api/sessions/meta');
+    sessionMetaMap.value = db || {};
+  } catch (e) {
+    console.warn('session meta load failed', e);
   }
+}
+
+function renderSessionNotesBar() {
+  const bar = $('session-notes-bar');
+  if (!bar) return;
+  const sid = ctx.sessionId;
+  const agent = ctx.agent || currentAgent.peek() || 'claude';
+  if (!sid) {
+    bar.style.display = 'none';
+    bar.innerHTML = '';
+    return;
+  }
+  const meta = getSessionMeta(agent, sid);
+  const note = (meta.notes || '').trim();
+  const fav = !!meta.favorite;
+  bar.style.display = 'flex';
+  bar.innerHTML = `
+    <div class="flex-1 min-w-0 flex items-center gap-2">
+      <button type="button" class="session-fav-btn ${fav ? 'is-fav' : ''}" data-fav-toggle="1"
+              data-fav-session-id="${esc(sid)}" data-fav-session-agent="${esc(agent)}"
+              title="${fav ? 'Unfavorite' : 'Favorite'}">${fav ? '★' : '☆'}</button>
+      <span class="font-bold text-base-content/40 uppercase flex-shrink-0">Session:</span>
+      <span class="truncate text-base-content/70 ${note ? '' : 'italic text-base-content/40'}"
+            id="session-notes-text" title="${esc(note || 'Add a note for this session')}">${esc(note || 'No session note')}</span>
+    </div>
+    <button id="btn-edit-session-notes" class="btn btn-ghost btn-xs px-1.5">Note</button>
+  `;
+}
+
+function renderSessionNotesEditMode() {
+  const bar = $('session-notes-bar');
+  if (!bar || !ctx.sessionId) return;
+  const agent = ctx.agent || currentAgent.peek() || 'claude';
+  const meta = getSessionMeta(agent, ctx.sessionId);
+  bar.innerHTML = `
+    <input id="session-notes-input" type="text" class="input input-xs input-bordered flex-1 text-xs"
+           placeholder="Note for this session…" value="${esc(meta.notes || '')}">
+    <button id="btn-save-session-notes" class="btn btn-primary btn-xs px-2">Save</button>
+    <button id="btn-cancel-session-notes" class="btn btn-ghost btn-xs px-2">Cancel</button>
+  `;
+  const input = $('session-notes-input');
+  input?.focus();
+  input?.select();
+}
+
+async function toggleSessionFavorite(sessionId, agent) {
+  const key = metaKey(agent, sessionId);
+  const prev = sessionMetaMap.peek()?.[key] || { favorite: false, notes: '' };
+  const nextFav = !prev.favorite;
+  // optimistic
+  sessionMetaMap.value = {
+    ...sessionMetaMap.peek(),
+    [key]: { ...prev, favorite: nextFav, updatedAt: Date.now() },
+  };
+  try {
+    await api('PUT', '/api/sessions/meta', { sessionId, agent, favorite: nextFav });
+  } catch (e) {
+    sessionMetaMap.value = { ...sessionMetaMap.peek(), [key]: prev };
+    alert(`Favorite failed: ${e.message}`);
+  }
+  if (ctx.sessionId === sessionId) renderSessionNotesBar();
+}
+
+async function saveSessionNotes(sessionId, agent, notes) {
+  const key = metaKey(agent, sessionId);
+  const prev = sessionMetaMap.peek()?.[key] || { favorite: false, notes: '' };
+  try {
+    const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, notes });
+    sessionMetaMap.value = {
+      ...sessionMetaMap.peek(),
+      [key]: { favorite: res.favorite ?? prev.favorite, notes: res.notes ?? notes, updatedAt: Date.now() },
+    };
+  } catch (e) {
+    alert(`Save note failed: ${e.message}`);
+    return false;
+  }
+  return true;
 }
 
 export async function showApp() {
@@ -1055,7 +1167,7 @@ export async function showApp() {
     }
   }
 
-  await Promise.all([loadAllSessions(), loadWorkspaces()]);
+  await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -1391,6 +1503,7 @@ export function initShell() {
   });
 
   delegate.on('click', '[data-session-id]', (e, el) => {
+    if (e.target.closest('[data-fav-toggle]')) return;
     resumeSession(
       el.dataset.sessionId,
       el.dataset.sessionCwd || null,
@@ -1523,36 +1636,68 @@ export function initShell() {
   delegate.on('click', '#stop-btn',        stopProcessing);
   delegate.on('click', '#btn-logout',      () => { ctx.token = null; localStorage.removeItem('token'); location.reload(); });
 
-  // Project Notes events
-  delegate.on('click', '#btn-edit-project-notes, #project-notes-text', () => {
+  // Project Goal + Notes
+  delegate.on('click', '#btn-edit-project-notes, #project-goal-text, #project-notes-text', () => {
     renderProjectNotesEditMode();
   });
   delegate.on('click', '#btn-cancel-project-notes', () => {
     renderProjectNotesDisplayMode();
   });
-  
-  const handleSaveNotes = async () => {
-    const input = $('project-notes-input');
-    const notes = input ? input.value.trim() : '';
+
+  const handleSaveProjectNotes = async () => {
+    const goal = $('project-goal-input')?.value?.trim() ?? activeProjectGoal;
+    const notes = $('project-notes-input')?.value?.trim() ?? activeProjectNotes;
     const proj = currentProject.peek();
     if (!proj || !proj.path) return;
-    
     try {
-      const res = await api('POST', '/api/projects/notes', {
-        root: proj.path,
-        notes: notes
-      });
-      activeNotesText = res.notes || '';
+      const res = await api('POST', '/api/projects/notes', { root: proj.path, goal, notes });
+      activeProjectGoal = res.goal || '';
+      activeProjectNotes = res.notes || '';
       renderProjectNotesDisplayMode();
     } catch (err) {
       alert(`Error saving project notes: ${err.message}`);
     }
   };
-  
-  delegate.on('click', '#btn-save-project-notes', handleSaveNotes);
-  delegate.on('keydown', '#project-notes-input', e => {
-    if (e.key === 'Enter') handleSaveNotes();
+
+  delegate.on('click', '#btn-save-project-notes', handleSaveProjectNotes);
+  delegate.on('keydown', '#project-goal-input', e => {
+    if (e.key === 'Enter') handleSaveProjectNotes();
     if (e.key === 'Escape') renderProjectNotesDisplayMode();
+  });
+  delegate.on('keydown', '#project-notes-input', e => {
+    if (e.key === 'Escape') renderProjectNotesDisplayMode();
+  });
+
+  // Session favorites + notes
+  delegate.on('click', '[data-fav-toggle]', (e, el) => {
+    e.stopPropagation();
+    e.preventDefault();
+    toggleSessionFavorite(el.dataset.favSessionId, el.dataset.favSessionAgent || 'claude');
+  });
+  delegate.on('click', '#btn-edit-session-notes, #session-notes-text', () => {
+    renderSessionNotesEditMode();
+  });
+  delegate.on('click', '#btn-cancel-session-notes', () => renderSessionNotesBar());
+  delegate.on('click', '#btn-save-session-notes', async () => {
+    const notes = $('session-notes-input')?.value?.trim() || '';
+    if (!ctx.sessionId) return;
+    const agent = ctx.agent || currentAgent.peek() || 'claude';
+    if (await saveSessionNotes(ctx.sessionId, agent, notes)) renderSessionNotesBar();
+  });
+  delegate.on('keydown', '#session-notes-input', async e => {
+    if (e.key === 'Escape') renderSessionNotesBar();
+    if (e.key === 'Enter') {
+      const notes = e.target.value.trim();
+      if (!ctx.sessionId) return;
+      const agent = ctx.agent || currentAgent.peek() || 'claude';
+      if (await saveSessionNotes(ctx.sessionId, agent, notes)) renderSessionNotesBar();
+    }
+  });
+  delegate.on('click', '#btn-fav-filter', () => {
+    const next = !favoritesOnly.peek();
+    favoritesOnly.value = next;
+    localStorage.setItem('favoritesOnly', next ? '1' : '0');
+    $('btn-fav-filter')?.classList.toggle('active', next);
   });
 
   // Restore agent/model selectors + sidebar filters after DOM is ready
@@ -1565,6 +1710,7 @@ export function initShell() {
   document.querySelectorAll('[data-agent-filter]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.agentFilter === agentFilter.peek());
   });
+  $('btn-fav-filter')?.classList.toggle('active', favoritesOnly.peek());
   document.querySelectorAll('[data-view]').forEach(btn => {
     const on = btn.dataset.view === sidebarView.peek();
     btn.classList.toggle('bg-primary/15', on);

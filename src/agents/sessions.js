@@ -28,6 +28,7 @@ async function readClaudeSessionMeta(filePath) {
   let sessionId = null;
   let cwd = null;
   let totalTokens = 0;
+  let turnCount = 0;
   try {
     const stream = fsSync.createReadStream(filePath);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -36,6 +37,14 @@ async function readClaudeSessionMeta(filePath) {
         const d = JSON.parse(line);
         if (!sessionId && d.sessionId) sessionId = d.sessionId;
         if (!cwd && d.cwd) cwd = d.cwd;
+        // Count user turns (exclude tool-result only / meta noise when possible)
+        if (d.type === 'user') {
+          const content = d.message?.content;
+          const isToolResult = Array.isArray(content)
+            && content.length > 0
+            && content.every(p => p?.type === 'tool_result');
+          if (!isToolResult) turnCount += 1;
+        }
         const u = d.message?.usage;
         if (u) {
           totalTokens += (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
@@ -43,7 +52,7 @@ async function readClaudeSessionMeta(filePath) {
       } catch {}
     }
   } catch {}
-  return { sessionId, cwd, totalTokens };
+  return { sessionId, cwd, totalTokens, turnCount };
 }
 
 async function readClaudeFirstMessage(filePath) {
@@ -108,6 +117,7 @@ async function scanClaudeConfigDir(configDir, nameMap, filterCwd) {
           updatedAt: stat.mtimeMs,
           hasMemory,
           totalTokens: meta.totalTokens || 0,
+          turnCount: meta.turnCount || 0,
         });
       } catch {}
     }));
@@ -234,9 +244,10 @@ async function findCodexRollouts(codexHome) {
 }
 
 async function readCodexMeta(filePath) {
-  let id = null, cwd = null, ts = null;
+  let id = null, cwd = null, ts = null, turnCount = 0;
   try {
-    const stream = fsSync.createReadStream(filePath, { start: 0, end: 64 * 1024 });
+    // Full scan: meta is early; turnCount needs whole file
+    const stream = fsSync.createReadStream(filePath);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     for await (const line of rl) {
       try {
@@ -245,19 +256,24 @@ async function readCodexMeta(filePath) {
           id = d.payload.id || id;
           cwd = d.payload.cwd || cwd;
           ts = d.payload.timestamp || d.timestamp || ts;
-          break;
+        }
+        // Codex user turns appear in a few event shapes across versions
+        if (d.type === 'event_msg' && d.payload?.type === 'user_message') turnCount += 1;
+        else if (d.type === 'response_item' && d.payload?.role === 'user') turnCount += 1;
+        else if (d.type === 'turn_context' && d.payload?.turn_index != null) {
+          // last turn_index + 1 is a better total; bump max
+          const idx = Number(d.payload.turn_index) + 1;
+          if (idx > turnCount) turnCount = idx;
         }
       } catch {}
     }
-    rl.close();
-    stream.destroy();
   } catch {}
   // Fallback: parse id from filename rollout-...-<uuid>.jsonl
   if (!id) {
     const m = path.basename(filePath).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
     if (m) id = m[1];
   }
-  return { id, cwd, ts };
+  return { id, cwd, ts, turnCount };
 }
 
 export async function scanCodexSessions(codexHome, filterCwd = null) {
@@ -281,6 +297,7 @@ export async function scanCodexSessions(codexHome, filterCwd = null) {
         updatedAt: stat.mtimeMs,
         hasMemory: false,
         filePath,
+        turnCount: meta.turnCount || 0,
       });
     } catch {}
   }));
@@ -412,6 +429,18 @@ export async function scanGrokSessions(grokHome, filterCwd = null) {
         totalTokens = sig.contextTokensUsed ?? 0;
       } catch {}
 
+      let turnCount = 0;
+      try {
+        const stream = fsSync.createReadStream(path.join(sessionDir, 'chat_history.jsonl'));
+        const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        for await (const line of rl) {
+          try {
+            const d = JSON.parse(line);
+            if (d.role === 'user' || d.type === 'user') turnCount += 1;
+          } catch {}
+        }
+      } catch {}
+
       sessions.push({
         sessionId,
         agent: 'grok',
@@ -422,6 +451,7 @@ export async function scanGrokSessions(grokHome, filterCwd = null) {
         hasMemory,
         sessionDir,
         totalTokens,
+        turnCount,
       });
     }));
   }));
@@ -854,6 +884,7 @@ function publicSession(s) {
     hasMemory: Boolean(s.hasMemory),
     projectName: projectNameFromCwd(cwd),
     totalTokens: s.totalTokens || 0,
+    turnCount: Number(s.turnCount) || 0,
     // keep for deep search only when needed — not sent if stripped below
     _filePath: s.filePath || null,
     _sessionDir: s.sessionDir || null,

@@ -31,6 +31,7 @@ export const PORT = parseInt(process.env.PORT || '3000');
 const CREDENTIALS_FILE  = process.env.CREDENTIALS_FILE  || path.join(rootDir, '.credentials.json');
 const WORKSPACES_FILE   = process.env.WORKSPACES_FILE   || path.join(rootDir, '.workspaces.json');
 const PROJECT_NOTES_FILE = process.env.PROJECT_NOTES_FILE || path.join(rootDir, '.project_notes.json');
+const SESSION_META_FILE  = process.env.SESSION_META_FILE  || path.join(rootDir, '.session_meta.json');
 const CLAUDE_CLI_PATH = process.env.CLAUDE_CLI_PATH || 'claude';
 const CODEX_CLI_PATH  = process.env.CODEX_CLI_PATH  || 'codex';
 const GROK_CLI_PATH   = process.env.GROK_CLI_PATH   || 'grok';
@@ -96,6 +97,22 @@ async function saveWorkspacesStore() {
 }
 
 let projectNotesCache = null;
+let sessionMetaCache = null;
+
+/** Normalize project entry: old { notes } was the goal line. */
+function normalizeProjectEntry(entry) {
+  if (!entry || typeof entry !== 'object') return { goal: '', notes: '', updatedAt: 0 };
+  const hasGoalKey = Object.prototype.hasOwnProperty.call(entry, 'goal');
+  if (!hasGoalKey && entry.notes != null) {
+    // legacy: single notes field = Project Goal
+    return { goal: String(entry.notes || ''), notes: '', updatedAt: entry.updatedAt || 0 };
+  }
+  return {
+    goal: String(entry.goal || ''),
+    notes: String(entry.notes || ''),
+    updatedAt: entry.updatedAt || 0,
+  };
+}
 
 async function loadProjectNotes() {
   if (projectNotesCache) return projectNotesCache;
@@ -110,6 +127,25 @@ async function loadProjectNotes() {
 async function saveProjectNotes() {
   if (!projectNotesCache) return;
   await fs.writeFile(PROJECT_NOTES_FILE, JSON.stringify(projectNotesCache, null, 2), 'utf8');
+}
+
+function sessionMetaKey(agent, sessionId) {
+  return `${agent || 'claude'}:${sessionId}`;
+}
+
+async function loadSessionMeta() {
+  if (sessionMetaCache) return sessionMetaCache;
+  try {
+    sessionMetaCache = JSON.parse(await fs.readFile(SESSION_META_FILE, 'utf8'));
+  } catch {
+    sessionMetaCache = {};
+  }
+  return sessionMetaCache;
+}
+
+async function saveSessionMeta() {
+  if (!sessionMetaCache) return;
+  await fs.writeFile(SESSION_META_FILE, JSON.stringify(sessionMetaCache, null, 2), 'utf8');
 }
 
 async function getWorkspaces() {
@@ -522,23 +558,26 @@ export function createApp() {
       if (!root) return res.status(400).json({ error: 'root parameter required' });
       const resolved = path.resolve(expandPath(root));
       const db = await loadProjectNotes();
-      const entry = db[resolved] || { notes: '', updatedAt: 0 };
-      res.json(entry);
+      res.json(normalizeProjectEntry(db[resolved]));
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.post('/api/projects/notes', authMiddleware, async (req, res) => {
     try {
-      const { root, notes } = req.body;
+      const { root, goal, notes } = req.body || {};
       if (!root) return res.status(400).json({ error: 'root required' });
       const resolved = path.resolve(expandPath(root));
       const db = await loadProjectNotes();
-      db[resolved] = {
-        notes: notes || '',
-        updatedAt: Date.now()
+      const prev = normalizeProjectEntry(db[resolved]);
+      // Allow partial updates: omit field → keep previous
+      const next = {
+        goal: goal !== undefined ? String(goal || '') : prev.goal,
+        notes: notes !== undefined ? String(notes || '') : prev.notes,
+        updatedAt: Date.now(),
       };
+      db[resolved] = next;
       await saveProjectNotes();
-      res.json({ success: true, ...db[resolved] });
+      res.json({ success: true, ...next });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -553,6 +592,37 @@ export function createApp() {
         await saveProjectNotes();
       }
       res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ── Session meta: favorites + per-session notes ───────────────────────────
+  app.get('/api/sessions/meta', authMiddleware, async (_req, res) => {
+    try {
+      const db = await loadSessionMeta();
+      res.json(db);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.put('/api/sessions/meta', authMiddleware, async (req, res) => {
+    try {
+      const { sessionId, agent, favorite, notes } = req.body || {};
+      if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+      const key = sessionMetaKey(agent || 'claude', sessionId);
+      const db = await loadSessionMeta();
+      const prev = db[key] || { favorite: false, notes: '', updatedAt: 0 };
+      const next = {
+        favorite: favorite !== undefined ? Boolean(favorite) : Boolean(prev.favorite),
+        notes: notes !== undefined ? String(notes || '') : String(prev.notes || ''),
+        updatedAt: Date.now(),
+      };
+      // Drop empty entries to keep file small
+      if (!next.favorite && !next.notes) {
+        delete db[key];
+      } else {
+        db[key] = next;
+      }
+      await saveSessionMeta();
+      res.json({ success: true, key, ...(db[key] || { favorite: false, notes: '', updatedAt: Date.now() }) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
