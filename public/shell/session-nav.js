@@ -16,6 +16,23 @@ import { refreshModelSelect } from './session-list.js';
 import { renderSessionNotesBar } from './notes.js';
 import { updateDashboard } from './dashboard.js';
 
+/** Show which edge machine Files/Git/Shell paths belong to. */
+function syncMachinePathHints(machineId) {
+  for (const id of ['files-machine-hint', 'git-machine-hint']) {
+    const el = $(id);
+    if (!el) continue;
+    if (machineId) {
+      el.textContent = `@${machineId}`;
+      el.classList.remove('hidden');
+      el.title = `Paths are on machine ${machineId}`;
+    } else {
+      el.textContent = '';
+      el.classList.add('hidden');
+      el.title = '';
+    }
+  }
+}
+
 export function openProject(project) {
   batch(() => { currentProject.value = project; sessionFilter.value = project.path; });
   ctx.sessionId = null;
@@ -37,6 +54,7 @@ export function goHome() {
   filesPath.value = '';
   viewingFile.value = null;
   ctx.sessionId = null;
+  syncMachinePathHints(null);
 
   const topbar = $('topbar-project');
   if (topbar) topbar.textContent = 'Select a session';
@@ -93,26 +111,45 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
     ? `${resolvedCwd || sid}  @${resolvedMachine}`
     : (resolvedCwd || sid);
 
-  // Always open project shell + sync roots when we know the cwd
-  if (resolvedCwd) {
-    const prev = currentProject.peek();
-    const pathChanged = !prev || prev.path !== resolvedCwd;
-    const name = resolvedCwd.split('/').filter(Boolean).pop() || resolvedCwd;
-    if (pathChanged) {
-      batch(() => {
-        currentProject.value = { id: name, name, path: resolvedCwd, machineId: resolvedMachine };
-        sessionFilter.value = resolvedCwd;
-        filesRoot.value = '';
-        gitRoot.value = '';
-        filesPath.value = '';
-        viewingFile.value = null;
+  // Resolve cwd on the *target edge machine* so Files/Git/Shell use that host's absolute path
+  let edgeCwd = resolvedCwd;
+  if (edgeCwd) {
+    try {
+      const r = await api('POST', '/api/resolve-path', { path: edgeCwd }, undefined, {
+        machineId: resolvedMachine || undefined,
       });
-    } else if (resolvedMachine && prev && prev.machineId !== resolvedMachine) {
-      currentProject.value = { ...prev, machineId: resolvedMachine };
+      if (r?.path) edgeCwd = r.path;
+      else if (r?.isDir === false) {
+        // keep original; may still be valid as session cwd
+      }
+    } catch {
+      // fall back to session-reported cwd (still on that machine)
     }
-    $('topbar-project').textContent = topLabel;
-    const fi = $('files-root-input'); if (fi) fi.value = resolvedCwd;
-    const gi = $('git-root-input');   if (gi) gi.value = resolvedCwd;
+  }
+
+  // Always open project shell + sync roots to the edge absolute path
+  if (edgeCwd) {
+    const name = edgeCwd.split('/').filter(Boolean).pop() || edgeCwd;
+    batch(() => {
+      currentProject.value = {
+        id: name,
+        name,
+        path: edgeCwd,
+        machineId: resolvedMachine,
+      };
+      sessionFilter.value = edgeCwd;
+      // Files/Git roots = session cwd on the selected machine (not hub, not empty)
+      filesRoot.value = edgeCwd;
+      gitRoot.value = edgeCwd;
+      filesPath.value = '';
+      viewingFile.value = null;
+    });
+    $('topbar-project').textContent = resolvedMachine
+      ? `${edgeCwd}  @${resolvedMachine}`
+      : edgeCwd;
+    const fi = $('files-root-input'); if (fi) fi.value = edgeCwd;
+    const gi = $('git-root-input');   if (gi) gi.value = edgeCwd;
+    syncMachinePathHints(resolvedMachine);
     $('welcome')?.classList.add('hidden');
     const pv = $('project-view');
     if (pv) {
@@ -135,6 +172,7 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
       pv.style.flex = '1';
       pv.style.minHeight = '0';
     }
+    syncMachinePathHints(resolvedMachine);
   }
 
   // Switch to target tab BEFORE history (files/git/shell usable immediately)
@@ -147,7 +185,7 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
 
   setLastSessionContext({
     sessionId: sid,
-    cwd: resolvedCwd,
+    cwd: edgeCwd || resolvedCwd,
     configDir: resolvedConfig,
     agent: resolvedAgent,
     machineId: resolvedMachine,

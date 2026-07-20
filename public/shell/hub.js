@@ -168,6 +168,13 @@ export async function enterMachine(machineId, { forceReload = false } = {}) {
       sessionFilter.value = null;
       viewingFile.value = null;
     });
+    // Drop previous machine paths so Files/Git don't browse the wrong host
+    try {
+      const { filesRoot, gitRoot, filesPath } = await import('../state.js');
+      filesRoot.value = '';
+      gitRoot.value = '';
+      filesPath.value = '';
+    } catch { /* ignore */ }
     if (switching) {
       const { goHome } = await import('./session-nav.js');
       goHome();

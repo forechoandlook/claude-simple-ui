@@ -245,7 +245,8 @@ export const AppShell = () => `
           <div id="tab-files" class="hidden flex-col flex-1 overflow-hidden">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
               <span class="text-xs text-base-content/40 flex-shrink-0">Root</span>
-              <input id="files-root-input" type="text" placeholder="Project path (leave blank for session cwd)"
+              <span id="files-machine-hint" class="hidden text-[10px] font-mono font-semibold text-primary flex-shrink-0"></span>
+              <input id="files-root-input" type="text" placeholder="Absolute path on the target machine"
                 class="input input-xs flex-1 font-mono text-xs bg-transparent border-0 focus:outline-none px-1" autocomplete="off">
               <button id="files-root-btn" class="btn btn-ghost btn-xs text-xs">Go</button>
             </div>
@@ -262,7 +263,8 @@ export const AppShell = () => `
           <div id="tab-git" class="hidden flex-col flex-1 overflow-hidden">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
               <span class="text-xs text-base-content/40 flex-shrink-0">Root</span>
-              <input id="git-root-input" type="text" placeholder="Project path (leave blank for session cwd)"
+              <span id="git-machine-hint" class="hidden text-[10px] font-mono font-semibold text-primary flex-shrink-0"></span>
+              <input id="git-root-input" type="text" placeholder="Absolute path on the target machine"
                 class="input input-xs flex-1 font-mono text-xs bg-transparent border-0 focus:outline-none px-1" autocomplete="off">
               <button id="git-root-btn" class="btn btn-ghost btn-xs text-xs">Go</button>
             </div>

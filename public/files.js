@@ -410,7 +410,8 @@ export function initFilesTab() {
   effect(() => {
     const tab = currentTab.value;
     const proj = currentProject.value;
-    const root = filesRoot.value || proj?.path;
+    // Prefer explicit filesRoot; else session cwd on the selected machine
+    const root = (filesRoot.value || proj?.path || '').trim();
     const file = viewingFile.value;
     const dir = filesPath.value;
     const area = $('files-area');
@@ -418,7 +419,7 @@ export function initFilesTab() {
     const ctrl = new AbortController();
     if (tab !== 'files') { return () => ctrl.abort(); }
     if (!root) {
-      area.innerHTML = '<div class="p-4 text-xs text-base-content/40">Enter a project root above, or open a session with a working directory.</div>';
+      area.innerHTML = '<div class="p-4 text-xs text-base-content/40">No path yet — open a session (uses that machine&apos;s cwd) or type an absolute path and press Go.</div>';
       return () => ctrl.abort();
     }
     const id = proj?.id || '_';
