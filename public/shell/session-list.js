@@ -137,7 +137,7 @@ export function refreshModelSelect() {
 }
 
 export function renderProjectGroups(groups) {
-  if (!groups.length) {
+  if (!Array.isArray(groups) || !groups.length) {
     return `<div class="px-3 py-6 text-center text-xs text-base-content/40">
       No projects in this range.<br>
       <span class="text-base-content/30">Try “All” time or another agent.</span>
@@ -190,7 +190,7 @@ export function renderProjectGroups(groups) {
 }
 
 export function renderTimeline(sessions) {
-  if (!sessions.length) {
+  if (!Array.isArray(sessions) || !sessions.length) {
     return `<div class="px-3 py-6 text-center text-xs text-base-content/40">
       No recent activity.<br>
       <span class="text-base-content/30">Widen the time range or clear filters.</span>
@@ -214,10 +214,12 @@ export function renderTimeline(sessions) {
 
 export function renderSessionList() {
   const view = sidebarView.value;
+  const sessions = Array.isArray(filteredSessions.value) ? filteredSessions.value : [];
+  const groups = Array.isArray(projectGroups.value) ? projectGroups.value : [];
   if (view === 'timeline') {
-    return renderTimeline(filteredSessions.value);
+    return renderTimeline(sessions);
   }
-  return renderProjectGroups(projectGroups.value);
+  return renderProjectGroups(groups);
 }
 
 export function syncSidebarChrome() {
@@ -239,19 +241,22 @@ export function syncSidebarChrome() {
   const status = $('search-status');
   if (!status) return;
   const hits = activityHits.peek();
-  const q = sessionSearch.peek().trim();
+  const hitResults = Array.isArray(hits?.results) ? hits.results : null;
+  const q = (sessionSearch.peek() || '').trim();
   if (activityLoading.peek()) {
     status.classList.remove('hidden');
     status.textContent = 'Searching content…';
-  } else if (q && hits?.results) {
+  } else if (q && hitResults) {
     status.classList.remove('hidden');
-    status.textContent = `${hits.results.length} hit${hits.results.length === 1 ? '' : 's'} · ${timeRange.peek() === '0' ? 'all time' : timeRange.peek() + 'd'}${hits.deep === false ? '' : ' (incl. content)'}`;
+    status.textContent = `${hitResults.length} hit${hitResults.length === 1 ? '' : 's'} · ${timeRange.peek() === '0' ? 'all time' : timeRange.peek() + 'd'}${hits.deep === false ? '' : ' (incl. content)'}`;
   } else if (q) {
     status.classList.remove('hidden');
     status.textContent = 'Local filter only — type to deep-search';
   } else {
-    const n = filteredSessions.peek().length;
-    const pg = projectGroups.peek().length;
+    const sessions = filteredSessions.peek();
+    const groups = projectGroups.peek();
+    const n = Array.isArray(sessions) ? sessions.length : 0;
+    const pg = Array.isArray(groups) ? groups.length : 0;
     status.classList.remove('hidden');
     status.textContent = sidebarView.peek() === 'projects'
       ? `${pg} project${pg === 1 ? '' : 's'} · ${n} session${n === 1 ? '' : 's'}`
