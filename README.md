@@ -4,7 +4,28 @@ A lightweight web UI for **Claude Code**, **OpenAI Codex**, and **Grok**. No bui
 
 Inspired by [cc-connect](https://github.com/chenhg5/cc-connect) agent adapters: Claude via the Agent SDK, Codex via `codex exec --json`, Grok via `grok --output-format streaming-json`.
 
-## Quick Start
+## Deployment modes
+
+| Mode | When to use | Hub (中心端) needed? | How to run |
+|------|-------------|----------------------|------------|
+| **Standalone（本地 / 单机）** | 本机开发、只有一台机器 | **不需要** | `node server.js` |
+| **Hub + Edge（多机）** | 多台机器、一个公网入口、统一 WebUI | **需要** | Hub: Go 二进制；每台业务机: `npm run client` |
+| **Edge only** | 已有 Hub，本机只当业务节点 | 需要已有 Hub | `npm run client` |
+
+**本地跑不需要中心端。** 单机默认就是 Standalone：UI + 后端 + agent 都在同一个 Node 进程里。
+
+前端会探测 `GET /api/hub`：没有该接口即按单机模式工作，逻辑与多机无关。
+
+```
+Standalone (default)          Multi-machine (optional)
+─────────────────────         ────────────────────────
+Browser → node server.js      Browser → Go Hub (public/)
+          (UI + agents)                    ├─► client.js @ machine A
+                                           ├─► client.js @ machine B
+                                           └─► client.js @ machine C
+```
+
+## Quick Start (local — no hub)
 
 ```bash
 npm install
@@ -12,23 +33,28 @@ node server.js
 # open http://localhost:3000
 ```
 
+Or with auto-reload:
+
+```bash
+npm run dev
+```
+
 First run creates an account. Token persists 7 days — no repeated login.
 
 Requires CLIs on `PATH` for the agents you use:
 
 ```bash
-# Claude Code
+# Claude Code — install Claude Code CLI
 # Codex
 npm install -g @openai/codex
-# Grok (xAI)
-# install the grok CLI and run `grok login`
+# Grok (xAI) — install grok CLI and run `grok login`
 ```
 
-## Environment Variables
+### Environment Variables (standalone / edge Node app)
 
 | Variable               | Default                           | Description                              |
 | ---------------------- | --------------------------------- | ---------------------------------------- |
-| `PORT`               | `3000`                          | HTTP port                                |
+| `PORT`               | `3000`                          | HTTP port (standalone)                   |
 | `AGENTS`             | `claude,codex,grok`             | Enabled agents (comma-separated)         |
 | `CLAUDE_CONFIG_DIRS` | `~/.claude`                     | Claude Code config dirs, comma-separated |
 | `CLAUDE_CLI_PATH`    | `claude`                        | Path to Claude Code executable           |
@@ -36,7 +62,17 @@ npm install -g @openai/codex
 | `CODEX_HOME`         | `~/.codex`                      | Codex home (sessions, config)            |
 | `GROK_CLI_PATH`      | `grok`                          | Path to Grok CLI                         |
 | `GROK_HOME`          | `~/.grok`                       | Grok home (sessions)                     |
-| `JWT_SECRET`         | persisted in`.credentials.json` | Override JWT signing key                 |
+| `JWT_SECRET`         | persisted in `.credentials.json` | Override JWT signing key                 |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | —                    | Bootstrap first user from env            |
+
+Edge-only env (when connecting to a hub):
+
+| Variable         | Description                                      |
+| ---------------- | ------------------------------------------------ |
+| `GATEWAY_URL`  | Hub control WS, e.g. `wss://host/machine-connect` |
+| `MACHINE_TOKEN`| Shared secret with hub                           |
+| `MACHINE_ID`   | Unique id for this host (default: hostname)      |
+| `LOCAL_PORT`   | Local bind port (default `13000`, `127.0.0.1`)  |
 
 ## Features
 
@@ -58,10 +94,10 @@ npm install -g @openai/codex
 - Filters: agent (All/Claude/Codex/Grok) + time range (Today / 7d / 14d / 30d / All) + **★ Fav**
 - Search: metadata (path, title, session notes) + **deep content peek** via `GET /api/activity?q=…`
 - Double-click a project header to open that cwd
-- **Session Conversion**: Convert / clone active sessions between Claude Code, Codex, and Grok on the fly (retaining conversation context)
-- **Project Goal + Notes**: one-line goal and multi-line notes per project path (stored in `.project_notes.json`)
-- **Session favorites & notes**: star sessions; add per-session notes (`.session_meta.json`)
-- **Thin sessions**: sessions with ≤2 user turns show a `thin·N` badge in the list
+- **Session conversion**: convert / clone sessions between Claude Code, Codex, and Grok
+- **Project Goal + Notes**: one-line goal and multi-line notes per project (`.project_notes.json`)
+- **Session favorites & notes**: star sessions; per-session notes (`.session_meta.json`)
+- **Thin sessions**: ≤2 user turns show a `thin·N` badge
 - Session history loads on click; sidebar is resizable
 
 ### Files preview
@@ -73,93 +109,85 @@ npm install -g @openai/codex
 
 - Multiple Claude Code config dirs (different accounts, MCPs, settings) — Claude only
 - Manage via ⚙️ → Settings: add name + path, delete
-- Workspace tab bar appears automatically when more than one workspace is configured
-- Each Claude session tagged with its workspace; correct `CLAUDE_CONFIG_DIR` is used when running Claude
+- Workspace tab bar appears when more than one workspace is configured
 
-### Files Tab
+### Files / Git / Shell tabs
 
-- Browse project files; click to view content
-- Upload files (streaming, no size limit), download, delete
-- Custom root path: type any path (supports `~`) → validated server-side via POST
+- **Files**: browse, upload, download, delete; custom root (`~` supported)
+- **Git**: status, staged/unstaged diff, graph log; custom root
+- **Shell**: interactive PTY via xterm.js + Python helper (`vim` / `htop` etc.)
 
-### Git Tab
+## Multi-machine (optional)
 
-- Branch, working tree status with color-coded file statuses
-- Unstaged / staged diff viewer
-- Collapsible git graph (`git log --graph --oneline --all`)
-- Custom root path: inspect any git repo regardless of session cwd
+Only needed when sessions live on **several hosts** and you want **one public WebUI**.
 
-### Shell Tab
+For full hub/edge setup, env vars, and routing details see **[gateway/README.md](gateway/README.md)**.
 
-- Full interactive pseudoterminal (PTY) powered by `xterm.js` and a lightweight Python 3 `pty` fork helper
-- Real-time character-by-character input mode (not line-buffered)
-- Fully supports interactive TUI applications (e.g. `vim`, `top`, `htop`, `nano`)
-- Interactive shell features: autocompletion (`Tab`), backspace, and native key navigation (`ArrowUp`/`ArrowDown` history)
-- Auto-fit responsive terminal resizing (syncs terminal window dimensions dynamically between frontend and backend via PTY ioctls)
-- Easy one-click reconnect and output clear
+### Quick overview
 
-## Multi-machine: one WebUI, many servers
-
-**Goal:** users open a **single public UI**; sessions from machine A, B, C appear in one list; chat/files route to the machine that owns that session.
-
-```
-Browser ──► Hub (Go binary + public/) ──► edge client.js @ A
-                                    ├──► edge client.js @ B
-                                    └──► edge client.js @ C
-```
-
-| Role | What it is | Install |
-|------|------------|---------|
-| **Hub (中心端)** | Public WebUI + login + session merge + routing | Go binary `claude-gateway` + copy of `public/` |
-| **Edge (服务端)** | Agent runtime on each host (CLIs, sessions, files) | Node `npm run client` |
-| **Standalone** | UI + agents on one machine (dev / single host) | `node server.js` — no hub |
-
-### Hub (public VPS)
+| Role | Tech | Responsibility |
+|------|------|----------------|
+| **Hub (中心端)** | **Go** binary `claude-gateway` + `public/` | Public UI, login, merge sessions, route by `machineId` |
+| **Edge (业务机)** | **Node** `npm run client` | Agents, local sessions, files, git, shell on that machine |
+| **Standalone** | **Node** `node server.js` | Everything on one machine — **no hub** |
 
 ```bash
+# --- Hub (public VPS) ---
 cd gateway && make linux-amd64
-# copy dist/claude-gateway-linux-amd64 + repo public/ to VPS
-
 MACHINE_TOKEN=shared-secret \
 HUB_USERNAME=admin HUB_PASSWORD=login-pass \
 PUBLIC_DIR=/opt/claude-simple/public \
 GATEWAY_ADDR=0.0.0.0:8080 \
-./claude-gateway
+./dist/claude-gateway-linux-amd64
+
+# --- Edge on machine A ---
+MACHINE_TOKEN=shared-secret MACHINE_ID=laptop-a \
+  GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
+
+# --- Edge on machine B ---
+MACHINE_TOKEN=shared-secret MACHINE_ID=build-b \
+  GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
 ```
 
-Login in the browser with `HUB_USERNAME` / `HUB_PASSWORD`.
+In hub mode the UI:
 
-### Edge (each machine with sessions)
+- Merges sessions from all edges (`@machineId` on rows)
+- Routes chat / files / git / shell to the machine that owns the session
+- Asks which machine to use for **New Session**
 
-```bash
-MACHINE_TOKEN=shared-secret \
-MACHINE_ID=laptop-a \
-GATEWAY_URL=wss://ui.example.com/machine-connect \
-npm run client
-```
+An edge may still run `node server.js` for a **local-only** UI on that host (independent of the hub).
 
-Edges only listen on `127.0.0.1`. Optional: run `node server.js` on an edge if you also want a **local** WebUI on that host.
+### Why Node on edges? (and Go later)
 
-### UX
+- **Hub is Go** — binary deploy, no Node on the public VPS.
+- **Edge stays Node for now** — Claude Agent SDK, session scanners, and streaming agents are implemented in the existing Node app.
+- A full Go rewrite of the edge is **not planned short-term** (install convenience can later use a Go wrapper around the Node app if needed).
 
-- Session list is **merged**; each row may show `@machineId`
-- Opening a session sets routing → chat/files/git hit that edge
-- New Session (hub mode) asks which machine to use
-
-Details: [gateway/README.md](gateway/README.md).
+Legacy Node hub: `npm run gateway` → `gateway.js` (prefer the Go binary).
 
 ## Stack
 
-- **Backend**: Node.js + Express + `ws` + `@anthropic-ai/claude-agent-sdk` + Python PTY subprocess helper (no native compilation required)
-- **Frontend**: Vanilla ES Modules + [mini-react](https://github.com/forechoandlook/mini-react) (signals, keyedList, effects) + DaisyUI + Tailwind + xterm.js (local assets)
-- **Storage**: IndexedDB (session cache, 5-min TTL) + JSON files (credentials, workspaces, project notes, session meta, JWT secret)
-- **Multi-host**: optional `gateway.js` + `client.js` relay
-- **No build step** (dev): browser loads `.js` files directly; optional `npm run build` for dist/
+- **App backend (standalone / edge)**: Node.js + Express + `ws` + `@anthropic-ai/claude-agent-sdk` + Python PTY helper
+- **Hub (optional multi-machine)**: Go (`gateway/`) — static UI, auth, fan-in sessions, HTTP/WS relay
+- **Frontend**: ES modules + [mini-react](https://github.com/forechoandlook/mini-react) + DaisyUI + Tailwind + xterm.js
+- **Storage**: IndexedDB (session cache) + JSON files (credentials, workspaces, project notes, session meta)
+- **No build step** (dev): browser loads `public/*.js` directly; optional `npm run build` for `dist/`
 
 ## Agent backends
 
 | Agent  | How it runs                                           | Resume            | Session store                            |
 | ------ | ----------------------------------------------------- | ----------------- | ---------------------------------------- |
-| Claude | `@anthropic-ai/claude-agent-sdk` → Claude Code CLI | SDK`resume`     | `~/.claude/projects/**/*.jsonl`        |
+| Claude | `@anthropic-ai/claude-agent-sdk` → Claude Code CLI | SDK `resume`    | `~/.claude/projects/**/*.jsonl`        |
 | Codex  | `codex exec --json` / `codex exec resume <id>`    | thread_id         | `~/.codex/sessions/**/rollout-*.jsonl` |
 | Grok   | `grok -p … --output-format streaming-json`         | `--resume <id>` | `~/.grok/sessions/<cwd>/<id>/`         |
+
+## Scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Standalone with `--watch` |
+| `npm start` / `npm run serve` | Production standalone |
+| `npm run build` | Bundle frontend into `dist/` |
+| `npm run client` | Edge worker (requires hub) |
+| `npm run gateway` | Legacy Node hub |
+| `npm run gateway:build` | Build Go hub via `gateway/Makefile` |
