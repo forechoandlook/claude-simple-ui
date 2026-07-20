@@ -311,6 +311,180 @@
   background: color-mix(in oklch, var(--color-error) 14%, transparent);
 }
 
+/* Files tab: full-file preview with highlight.js */
+.file-preview {
+  background: color-mix(in oklch, var(--color-base-content) 4%, var(--color-base-100));
+  color: color-mix(in oklch, var(--color-base-content) 92%, transparent);
+}
+[data-theme="dark"] .file-preview,
+[data-theme="night"] .file-preview,
+[data-theme="black"] .file-preview {
+  background: color-mix(in oklch, var(--color-base-100) 65%, black);
+}
+.file-preview code.hljs,
+.file-preview code.file-preview-code {
+  display: block;
+  padding: 0 !important;
+  background: transparent !important;
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: inherit;
+  color: inherit;
+  white-space: pre;
+  overflow-x: auto;
+}
+/* Reuse chat token palette outside .md so file preview is colored even if CDN theme lags */
+.file-preview .hljs-comment,
+.file-preview .hljs-quote {
+  color: color-mix(in oklch, var(--color-base-content) 42%, transparent);
+  font-style: italic;
+}
+.file-preview .hljs-keyword,
+.file-preview .hljs-selector-tag,
+.file-preview .hljs-meta .hljs-keyword {
+  color: #7c3aed;
+  font-weight: 600;
+}
+[data-theme="dark"] .file-preview .hljs-keyword,
+[data-theme="night"] .file-preview .hljs-keyword,
+[data-theme="black"] .file-preview .hljs-keyword { color: #c792ea; }
+.file-preview .hljs-string,
+.file-preview .hljs-attr,
+.file-preview .hljs-template-tag { color: #15803d; }
+[data-theme="dark"] .file-preview .hljs-string,
+[data-theme="night"] .file-preview .hljs-string { color: #c3e88d; }
+.file-preview .hljs-number,
+.file-preview .hljs-built_in,
+.file-preview .hljs-literal { color: #c2410c; }
+[data-theme="dark"] .file-preview .hljs-number,
+[data-theme="night"] .file-preview .hljs-number { color: #f78c6c; }
+.file-preview .hljs-title,
+.file-preview .hljs-section,
+.file-preview .hljs-function .hljs-title { color: #1d4ed8; }
+[data-theme="dark"] .file-preview .hljs-title,
+[data-theme="night"] .file-preview .hljs-title { color: #82aaff; }
+.file-preview .hljs-type,
+.file-preview .hljs-class .hljs-title { color: #0e7490; }
+[data-theme="dark"] .file-preview .hljs-type { color: #ffcb6b; }
+.file-preview .hljs-variable,
+.file-preview .hljs-template-variable,
+.file-preview .hljs-params {
+  color: color-mix(in oklch, var(--color-base-content) 88%, transparent);
+}
+.file-preview .hljs-addition {
+  color: var(--color-success);
+  background: color-mix(in oklch, var(--color-success) 14%, transparent);
+}
+.file-preview .hljs-deletion {
+  color: var(--color-error);
+  background: color-mix(in oklch, var(--color-error) 14%, transparent);
+}
+
+/* ── Office file previews (docx / xlsx / pptx) ─────────────────────────────── */
+.office-preview {
+  min-height: 0;
+}
+.office-docx-body {
+  max-width: 52rem;
+  margin: 0 auto;
+  line-height: 1.65;
+  font-size: 0.9375rem;
+}
+.office-docx-body p { margin: 0.55em 0; }
+.office-docx-body h1, .office-docx-body h2, .office-docx-body h3 {
+  font-weight: 700;
+  margin: 1em 0 0.4em;
+  line-height: 1.3;
+}
+.office-docx-body h1 { font-size: 1.4em; }
+.office-docx-body h2 { font-size: 1.2em; }
+.office-docx-body h3 { font-size: 1.05em; }
+.office-docx-body ul, .office-docx-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+.office-docx-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75em 0;
+  font-size: 0.88em;
+}
+.office-docx-body td, .office-docx-body th {
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 18%, transparent);
+  padding: 0.35em 0.55em;
+}
+.office-docx-body img {
+  max-width: 100%;
+  height: auto;
+}
+.office-warn {
+  border-bottom: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent);
+  margin: -1rem -1rem 0.75rem;
+  padding: 0.4rem 1rem;
+  background: color-mix(in oklch, var(--color-warning) 10%, transparent);
+}
+
+.office-sheet-tab {
+  appearance: none;
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 14%, transparent);
+  background: color-mix(in oklch, var(--color-base-content) 4%, var(--color-base-100));
+  color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
+  border-radius: 6px;
+  padding: 0.2rem 0.65rem;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.office-sheet-tab:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.office-sheet-tab.active {
+  background: color-mix(in oklch, var(--color-primary) 16%, transparent);
+  border-color: color-mix(in oklch, var(--color-primary) 45%, transparent);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+.office-sheet-body table {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  width: max-content;
+  min-width: 100%;
+}
+.office-sheet-body td, .office-sheet-body th {
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 14%, transparent);
+  padding: 0.2rem 0.45rem;
+  white-space: pre;
+  max-width: 20rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.office-sheet-body th,
+.office-sheet-body tr:first-child td {
+  background: color-mix(in oklch, var(--color-primary) 8%, var(--color-base-200));
+  font-weight: 600;
+}
+
+.office-slide-card {
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--color-base-content) 3%, var(--color-base-100));
+  overflow: hidden;
+}
+.office-slide-num {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+  padding: 0.35rem 0.75rem;
+  border-bottom: 1px solid color-mix(in oklch, var(--color-primary) 18%, transparent);
+  background: color-mix(in oklch, var(--color-primary) 8%, transparent);
+}
+.office-slide-body {
+  padding: 0.75rem 0.9rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+.office-slide-body p { margin: 0.35em 0; }
+
 /* Blockquote */
 .md blockquote {
   margin: 0.75em 0;

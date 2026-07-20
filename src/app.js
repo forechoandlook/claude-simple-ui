@@ -376,9 +376,26 @@ export function createApp() {
         res.setHeader('Content-Type', 'application/octet-stream');
         return fsSync.createReadStream(filePath).pipe(res);
       }
-      if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ error: 'File too large (>2MB)' });
-      const content = await fs.readFile(filePath, 'utf8');
-      res.json({ content, size: stat.size });
+      // Office / binary previews need more headroom than plain text
+      const isOffice = /\.(docx|pptx|xlsx)$/i.test(rel);
+      const maxBytes = isOffice ? 15 * 1024 * 1024 : 2 * 1024 * 1024;
+      if (stat.size > maxBytes) {
+        return res.status(413).json({
+          error: isOffice ? 'File too large (>15MB)' : 'File too large (>2MB)',
+        });
+      }
+      const buf = await fs.readFile(filePath);
+      // NUL in first 512 bytes ⇒ binary (ZIP-based Office formats, images, …)
+      const head = buf.subarray(0, Math.min(512, buf.length));
+      const binary = isOffice || head.includes(0);
+      if (binary) {
+        return res.json({
+          content: buf.toString('base64'),
+          encoding: 'base64',
+          size: stat.size,
+        });
+      }
+      res.json({ content: buf.toString('utf8'), encoding: 'utf8', size: stat.size });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
