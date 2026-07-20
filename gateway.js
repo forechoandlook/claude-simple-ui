@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * gateway.js — public-facing relay server
+ * gateway.js — LEGACY Node relay (prefer Go binary in ./gateway/)
+ *
+ *   cd gateway && make build && MACHINE_TOKEN=… ./dist/claude-gateway
  *
  * Machines (client.js) connect via WS to /machine-connect and register themselves.
  * Browser users visit the gateway, pick a machine, and all traffic is forwarded

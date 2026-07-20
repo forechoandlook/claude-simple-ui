@@ -8,6 +8,8 @@
     "dev": "NODE_ENV=development node --watch server.js",
     "serve": "node server.js",
     "gateway": "node gateway.js",
+    "gateway:go": "cd gateway && go run .",
+    "gateway:build": "cd gateway && make build",
     "client": "node client.js"
   },
   "dependencies": {

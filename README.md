@@ -98,42 +98,55 @@ npm install -g @openai/codex
 - Auto-fit responsive terminal resizing (syncs terminal window dimensions dynamically between frontend and backend via PTY ioctls)
 - Easy one-click reconnect and output clear
 
-## Multi-machine (gateway)
+## Multi-machine (Go gateway binary)
 
-Sessions live on the machines that run Claude/Codex/Grok CLIs. If work is split across **machine A** and **machine B**, run a **gateway** on a public host and a **client** agent on each machine:
+Sessions live on the machines that run Claude/Codex/Grok CLIs. The **public edge is a Go binary** (easy deploy: copy one file, no Node on the VPS). Each worker still runs Node `client.js` locally (needs CLIs + SDK).
 
 ```
-Browser  ──HTTP/WS──►  gateway.js  ──relay──►  client.js@A  (local server.js + local ~/.claude etc.)
-                              └──relay──►  client.js@B
+Browser  ──HTTP/WS──►  claude-gateway (Go)  ──relay──►  client.js@A  (local UI + ~/.claude …)
+                                       └──relay──►  client.js@B
 ```
 
 | Role | Process | Binds | Env |
 |------|---------|-------|-----|
-| Gateway | `npm run gateway` | public `GATEWAY_PORT` (default 8080) | `MACHINE_TOKEN` (shared secret) |
-| Machine | `npm run client` | `127.0.0.1:LOCAL_PORT` (default 13000) | `GATEWAY_URL`, `MACHINE_TOKEN`, `MACHINE_ID` (default hostname) |
+| **Gateway (Go)** | `gateway/dist/claude-gateway` | public port (default `:8080`) | `MACHINE_TOKEN`, optional `GATEWAY_PORT` / `GATEWAY_ADDR` |
+| Machine (Node) | `npm run client` | `127.0.0.1:LOCAL_PORT` (default 13000) | `GATEWAY_URL`, `MACHINE_TOKEN`, `MACHINE_ID` |
 
-Example:
+### Build & run gateway
 
 ```bash
-# On public VPS
-MACHINE_TOKEN=secret GATEWAY_PORT=8080 npm run gateway
+cd gateway
+make build                    # → dist/claude-gateway (~6MB, CGO_ENABLED=0)
+make linux-amd64              # cross-compile for VPS
 
-# On laptop A
-MACHINE_TOKEN=secret MACHINE_ID=laptop-a \
+# On public host
+MACHINE_TOKEN=long-secret ./dist/claude-gateway
+# or: GATEWAY_ADDR=0.0.0.0:8080 MACHINE_TOKEN=… ./dist/claude-gateway
+```
+
+See [gateway/README.md](gateway/README.md) for systemd and cross-compile targets.
+
+Legacy Node gateway (same protocol): `npm run gateway` → `gateway.js`.
+
+### Worker machines
+
+```bash
+# laptop A
+MACHINE_TOKEN=long-secret MACHINE_ID=laptop-a \
   GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
 
-# On server B
-MACHINE_TOKEN=secret MACHINE_ID=build-b \
+# server B
+MACHINE_TOKEN=long-secret MACHINE_ID=build-b \
   GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
 ```
 
-Open the gateway root URL → **Choose a machine** → full UI is proxied at `/machine/<id>/` (API + chat/shell WebSockets).
+Open the gateway root → **Choose a machine** → UI at `/machine/<id>/` (HTTP API + chat/shell WebSockets).
 
 Notes:
 
-- Auth, project notes, and session meta are **per machine** (each client has its own data files).
+- Auth, project notes, and session meta are **per machine**.
 - CLI tools and session history must exist on that machine.
-- For production, put TLS in front of the gateway (Caddy/nginx) and keep `MACHINE_TOKEN` long/random.
+- Put TLS in front of the Go gateway (Caddy/nginx) for production WSS.
 
 ## Stack
 

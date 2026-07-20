@@ -8,3 +8,5 @@ tmp
 .workspaces.json
 .credentials.json
 .project_notes.json
+.session_meta.json
+gateway/dist/
