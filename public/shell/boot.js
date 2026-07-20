@@ -4,7 +4,8 @@ import {
   hubMode, machinesList, hubMachineReady, setSelectedMachine, sessionsData, ctx,
 } from '../state.js';
 import { probeHub } from '../api.js';
-import { getCachedSessions, getLastSessionContext } from '../cache.js';
+import { getCachedSessions } from '../cache.js';
+import { getLastSessionContext } from './session-context.js';
 import { loadAllSessions, loadWorkspaces } from './session-list.js';
 import { loadSessionMetaMap } from './notes.js';
 import { resumeSession } from './session-nav.js';

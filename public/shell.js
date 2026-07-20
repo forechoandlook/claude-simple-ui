@@ -13,7 +13,7 @@ import {
   machinesList, AGENT_LABELS, AGENT_DEFAULT_MODEL, ctx,
 } from './state.js';
 import { api } from './api.js';
-import { getLastSessionContext } from './cache.js';
+import { getLastSessionContext } from './shell/session-context.js';
 import {
   connectWS, clearMessages, appendMsg, appendSystemMsg, sendMessage, stopProcessing,
   applyChatDensity,

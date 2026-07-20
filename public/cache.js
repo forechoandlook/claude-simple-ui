@@ -3,7 +3,6 @@ import { idb } from './lib.js';
 
 const db = idb('claude-ui');
 const SESSIONS_TTL = 5 * 60 * 1000; // 5 minutes
-const LAST_SESSION_KEY = 'lastSessionContext';
 
 export async function getCachedSessions() {
   try { return await db.get('sessions') ?? null; }
@@ -25,18 +24,4 @@ export async function setCachedWorkspaces(workspaces) {
   catch {}
 }
 
-/** Fast deep-link restore: last opened session metadata (localStorage). */
-export function getLastSessionContext() {
-  try {
-    const raw = localStorage.getItem(LAST_SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-
-export function setLastSessionContext( partial ) {
-  try {
-    const prev = getLastSessionContext() || {};
-    const next = { ...prev, ...partial, updatedAt: Date.now() };
-    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify(next));
-  } catch {}
-}
+// lastSessionContext lives in shell/session-context.js (avoid stale cache.js in browsers)

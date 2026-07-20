@@ -6,7 +6,7 @@ import {
   selectedMachineId, setSelectedMachine, AGENT_LABELS, ctx,
 } from '../state.js';
 import { api } from '../api.js';
-import { getLastSessionContext, setLastSessionContext } from '../cache.js';
+import { getLastSessionContext, setLastSessionContext } from './session-context.js';
 import {
   connectWS, clearMessages, appendMsg, appendSystemMsg, renderToolUse,
   appendHistoryTokenBar, appendContextBar, flushToolBatch, coerceTs,
