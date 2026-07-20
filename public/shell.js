@@ -318,9 +318,13 @@ export function initShell() {
     const raw = input?.value.trim();
     if (!raw) { sig.value = ''; return; }
     try {
+      // Resolve on the selected edge machine (hub attaches X-Machine-Id)
       const result = await api('POST', '/api/resolve-path', { path: raw });
+      if (result.isDir === false) throw new Error('Path is not a directory on the target machine');
       sig.value = result.path;
       input.value = result.path;
+      const proj = currentProject.peek();
+      if (proj) currentProject.value = { ...proj, path: result.path };
     } catch (e) {
       input.style.color = 'oklch(var(--er))';
       input.title = e.message;
