@@ -167,6 +167,15 @@ const AppShell = () => `
             <button class="px-4 py-2.5 text-sm border-b-2 flex-shrink-0 text-base-content/50 border-transparent" data-tab="memory">🧠 Memory</button>
           </div>
           <div id="tab-chat" class="flex flex-col flex-1 overflow-hidden relative">
+            <div id="project-notes-bar" class="bg-base-200 border-b border-base-300 px-3 py-1.5 text-xs flex justify-between items-center gap-2" style="display:none">
+              <div class="flex-1 truncate">
+                <span class="font-bold text-base-content/40 uppercase mr-1">Project Goal:</span>
+                <span id="project-notes-text" class="text-base-content/75 italic cursor-pointer hover:underline" title="Click to edit">No goals defined yet. Click edit to add a note...</span>
+              </div>
+              <div class="flex items-center gap-1.5 flex-shrink-0">
+                <button id="btn-edit-project-notes" class="btn btn-ghost btn-xs px-1.5 hover:bg-base-300">Edit</button>
+              </div>
+            </div>
             <div id="messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
             <div id="scroll-nav" class="absolute right-3 bottom-24 flex flex-col gap-1.5 z-10">
               <button id="scroll-top-btn" class="scroll-fab hidden" title="Jump to top">↑</button>
@@ -179,6 +188,12 @@ const AppShell = () => `
                   <option value="claude">Claude</option>
                   <option value="codex">Codex</option>
                   <option value="grok">Grok</option>
+                </select>
+                <select id="sel-convert-agent" class="select select-xs select-bordered text-xs font-semibold" title="Convert session to another agent">
+                  <option value="" disabled selected>Convert to...</option>
+                  <option value="claude">Convert to Claude</option>
+                  <option value="codex">Convert to Codex</option>
+                  <option value="grok">Convert to Grok</option>
                 </select>
                 <select id="sel-model" class="select select-xs select-bordered font-mono text-xs" title="Model">
                   <option value="claude-sonnet-4-5">sonnet-4-5</option>
@@ -847,7 +862,10 @@ export function goHome() {
   const topbar = $('topbar-project');
   if (topbar) topbar.textContent = 'Select a session';
   const welcome = $('welcome');
-  if (welcome) welcome.classList.remove('hidden');
+  if (welcome) {
+    welcome.classList.remove('hidden');
+    updateDashboard(filteredSessions.peek());
+  }
   const pv = $('project-view');
   if (pv) pv.classList.add('hidden');
   setHash('/');
@@ -969,11 +987,74 @@ export async function initAuth() {
   }
 }
 
+let activeNotesText = '';
+
+async function fetchProjectNotes(rootPath) {
+  const bar = $('project-notes-bar');
+  if (!bar) return;
+  
+  try {
+    const res = await api('GET', `/api/projects/notes?root=${encodeURIComponent(rootPath)}`);
+    activeNotesText = res.notes || '';
+    
+    renderProjectNotesDisplayMode();
+    bar.style.display = 'flex';
+  } catch (err) {
+    console.error('Error fetching project notes:', err);
+    bar.style.display = 'none';
+  }
+}
+
+function renderProjectNotesDisplayMode() {
+  const bar = $('project-notes-bar');
+  if (!bar) return;
+  
+  bar.innerHTML = `
+    <div class="flex-1 truncate">
+      <span class="font-bold text-base-content/40 uppercase mr-1">Project Goal:</span>
+      <span id="project-notes-text" class="text-base-content/75 italic cursor-pointer hover:underline" title="Click to edit">${esc(activeNotesText || 'No goals defined yet. Click edit to add a note...')}</span>
+    </div>
+    <div class="flex items-center gap-1.5 flex-shrink-0">
+      <button id="btn-edit-project-notes" class="btn btn-ghost btn-xs px-1.5 hover:bg-base-300">Edit</button>
+    </div>
+  `;
+}
+
+function renderProjectNotesEditMode() {
+  const bar = $('project-notes-bar');
+  if (!bar) return;
+  
+  bar.innerHTML = `
+    <input id="project-notes-input" type="text" class="input input-xs input-bordered flex-1 text-xs" placeholder="Describe the goal/notes of this project..." value="${esc(activeNotesText)}">
+    <div class="flex items-center gap-1 flex-shrink-0">
+      <button id="btn-save-project-notes" class="btn btn-primary btn-xs px-2">Save</button>
+      <button id="btn-cancel-project-notes" class="btn btn-ghost btn-xs px-2">Cancel</button>
+    </div>
+  `;
+  
+  const input = $('project-notes-input');
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
 export async function showApp() {
   $('auth-screen').style.display = 'none';
   const app = $('app');
   app.classList.remove('hidden');
   app.style.display = 'flex';
+  
+  if (location.hash.startsWith('#/session/')) {
+    const welcome = $('welcome');
+    if (welcome) welcome.classList.add('hidden');
+    const pv = $('project-view');
+    if (pv) {
+      pv.classList.remove('hidden');
+      pv.style.display = 'flex';
+    }
+  }
+
   await Promise.all([loadAllSessions(), loadWorkspaces()]);
 }
 
@@ -1187,7 +1268,10 @@ export function initShell() {
   // 3b. Welcome dashboard activity calendar
   effect(() => {
     const sessions = filteredSessions.value;
-    updateDashboard(sessions);
+    const welcome = $('welcome');
+    if (welcome && !welcome.classList.contains('hidden')) {
+      updateDashboard(sessions);
+    }
   });
 
   // 3. Filter badge
@@ -1196,6 +1280,17 @@ export function initShell() {
     if (!badge) return;
     badge.style.display = f ? 'inline' : 'none';
     badge.title = f || '';
+  });
+
+  // 3c. Project Notes loading
+  effect(() => {
+    const proj = currentProject.value;
+    if (proj && proj.path) {
+      fetchProjectNotes(proj.path);
+    } else {
+      const bar = $('project-notes-bar');
+      if (bar) bar.style.display = 'none';
+    }
   });
 
   // 4. Tab switching
@@ -1368,6 +1463,45 @@ export function initShell() {
       appendSystemMsg(`Agent → ${AGENT_LABELS[next] || next} · model ${currentModel.peek()} · new session`);
     }
   });
+  delegate.on('change', '#sel-convert-agent', async (_, el) => {
+    const target = el.value;
+    if (!target) return;
+    const sid = ctx.sessionId;
+    if (!sid) {
+      alert('No active session to convert.');
+      el.value = '';
+      return;
+    }
+    const source = ctx.agent || currentAgent.peek() || 'claude';
+    if (source === target) {
+      alert('Cannot convert to the same agent.');
+      el.value = '';
+      return;
+    }
+
+    el.disabled = true;
+    appendSystemMsg(`Converting session ${sid.slice(0, 8)} from ${source} to ${target}...`);
+    try {
+      const res = await api('POST', `/api/sessions/${sid}/convert`, {
+        targetAgent: target,
+        sourceAgent: source
+      });
+      if (res && res.success) {
+        appendSystemMsg(`✓ Converted successfully. New session: ${res.targetSessionId.slice(0, 8)}`);
+        await loadAllSessions();
+        await resumeSession(res.targetSessionId, currentProject.peek()?.path || null, null, res.targetAgent);
+        syncHash();
+      } else {
+        appendSystemMsg(`Failed to convert session.`);
+      }
+    } catch (err) {
+      appendSystemMsg(`Error converting session: ${err.message}`);
+      alert(`Error converting session: ${err.message}`);
+    } finally {
+      el.disabled = false;
+      el.value = '';
+    }
+  });
   delegate.on('change', '#sel-model', (_, el) => {
     currentModel.value = el.value;
     localStorage.setItem('model', el.value);
@@ -1388,6 +1522,38 @@ export function initShell() {
   delegate.on('click', '#send-btn',        sendMessage);
   delegate.on('click', '#stop-btn',        stopProcessing);
   delegate.on('click', '#btn-logout',      () => { ctx.token = null; localStorage.removeItem('token'); location.reload(); });
+
+  // Project Notes events
+  delegate.on('click', '#btn-edit-project-notes, #project-notes-text', () => {
+    renderProjectNotesEditMode();
+  });
+  delegate.on('click', '#btn-cancel-project-notes', () => {
+    renderProjectNotesDisplayMode();
+  });
+  
+  const handleSaveNotes = async () => {
+    const input = $('project-notes-input');
+    const notes = input ? input.value.trim() : '';
+    const proj = currentProject.peek();
+    if (!proj || !proj.path) return;
+    
+    try {
+      const res = await api('POST', '/api/projects/notes', {
+        root: proj.path,
+        notes: notes
+      });
+      activeNotesText = res.notes || '';
+      renderProjectNotesDisplayMode();
+    } catch (err) {
+      alert(`Error saving project notes: ${err.message}`);
+    }
+  };
+  
+  delegate.on('click', '#btn-save-project-notes', handleSaveNotes);
+  delegate.on('keydown', '#project-notes-input', e => {
+    if (e.key === 'Enter') handleSaveNotes();
+    if (e.key === 'Escape') renderProjectNotesDisplayMode();
+  });
 
   // Restore agent/model selectors + sidebar filters after DOM is ready
   refreshModelSelect();

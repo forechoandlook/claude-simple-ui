@@ -58,6 +58,8 @@ npm install -g @openai/codex
 - Filters: agent (All/Claude/Codex/Grok) + time range (Today / 7d / 14d / 30d / All)
 - Search: metadata (path, title) + **deep content peek** via `GET /api/activity?q=…`
 - Double-click a project header to open that cwd
+- **Session Conversion**: Convert / clone active sessions between Claude Code, Codex, and Grok on the fly (retaining conversation context)
+- **Project Notes**: Manage project goals and notes centrally with inline editing in the chat header
 - Session history loads on click; sidebar is resizable
 
 ### Workspaces

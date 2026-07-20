@@ -21,6 +21,7 @@ import {
   searchActivity,
   groupByProject,
   toClientSession,
+  convertSession,
 } from './agents/sessions.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
@@ -29,6 +30,7 @@ const rootDir = path.join(__dirname, '..');
 export const PORT = parseInt(process.env.PORT || '3000');
 const CREDENTIALS_FILE  = process.env.CREDENTIALS_FILE  || path.join(rootDir, '.credentials.json');
 const WORKSPACES_FILE   = process.env.WORKSPACES_FILE   || path.join(rootDir, '.workspaces.json');
+const PROJECT_NOTES_FILE = process.env.PROJECT_NOTES_FILE || path.join(rootDir, '.project_notes.json');
 const CLAUDE_CLI_PATH = process.env.CLAUDE_CLI_PATH || 'claude';
 const CODEX_CLI_PATH  = process.env.CODEX_CLI_PATH  || 'codex';
 const GROK_CLI_PATH   = process.env.GROK_CLI_PATH   || 'grok';
@@ -91,6 +93,23 @@ async function loadWorkspacesStore() {
 
 async function saveWorkspacesStore() {
   await fs.writeFile(WORKSPACES_FILE, JSON.stringify(wsStore, null, 2));
+}
+
+let projectNotesCache = null;
+
+async function loadProjectNotes() {
+  if (projectNotesCache) return projectNotesCache;
+  try {
+    projectNotesCache = JSON.parse(await fs.readFile(PROJECT_NOTES_FILE, 'utf8'));
+  } catch {
+    projectNotesCache = {};
+  }
+  return projectNotesCache;
+}
+
+async function saveProjectNotes() {
+  if (!projectNotesCache) return;
+  await fs.writeFile(PROJECT_NOTES_FILE, JSON.stringify(projectNotesCache, null, 2), 'utf8');
 }
 
 async function getWorkspaces() {
@@ -480,6 +499,46 @@ export function createApp() {
     });
   });
 
+  app.get('/api/projects/notes', authMiddleware, async (req, res) => {
+    try {
+      const root = req.query.root;
+      if (!root) return res.status(400).json({ error: 'root parameter required' });
+      const resolved = path.resolve(expandPath(root));
+      const db = await loadProjectNotes();
+      const entry = db[resolved] || { notes: '', updatedAt: 0 };
+      res.json(entry);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post('/api/projects/notes', authMiddleware, async (req, res) => {
+    try {
+      const { root, notes } = req.body;
+      if (!root) return res.status(400).json({ error: 'root required' });
+      const resolved = path.resolve(expandPath(root));
+      const db = await loadProjectNotes();
+      db[resolved] = {
+        notes: notes || '',
+        updatedAt: Date.now()
+      };
+      await saveProjectNotes();
+      res.json({ success: true, ...db[resolved] });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete('/api/projects/notes', authMiddleware, async (req, res) => {
+    try {
+      const root = req.query.root;
+      if (!root) return res.status(400).json({ error: 'root parameter required' });
+      const resolved = path.resolve(expandPath(root));
+      const db = await loadProjectNotes();
+      if (db[resolved]) {
+        delete db[resolved];
+        await saveProjectNotes();
+      }
+      res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // Session / context usage (Grok signals + turn totals; Claude last usage; Codex meta)
   // GET /api/usage?sessionId=...&agent=grok
   app.get('/api/usage', authMiddleware, async (req, res) => {
@@ -585,6 +644,42 @@ export function createApp() {
           };
       res.setHeader('X-Session-Agent', payload.agent);
       res.json(payload);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/sessions/:sessionId/convert', authMiddleware, async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const { targetAgent, sourceAgent } = req.body;
+      if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
+      if (!targetAgent) return res.status(400).json({ error: 'targetAgent required' });
+
+      const opts = {
+        claudeConfigDirs: CLAUDE_CONFIG_DIRS,
+        codexHome: CODEX_HOME,
+        grokHome: GROK_HOME,
+      };
+
+      let detectedSourceAgent = sourceAgent;
+      if (!detectedSourceAgent) {
+        const order = [...new Set([...ENABLED_AGENTS, 'claude', 'codex', 'grok'])];
+        for (const a of order) {
+          const bundle = await loadSessionMessages(sessionId, a, opts);
+          if (bundle) {
+            detectedSourceAgent = a;
+            break;
+          }
+        }
+      }
+
+      if (!detectedSourceAgent) {
+        return res.status(404).json({ error: 'Source session not found' });
+      }
+
+      const { targetSessionId } = await convertSession(sessionId, detectedSourceAgent, targetAgent, opts);
+      res.json({ success: true, targetSessionId, targetAgent });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

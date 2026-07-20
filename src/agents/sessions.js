@@ -3,6 +3,7 @@ import fsSync from 'fs';
 import readline from 'readline';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 
 // ─── Claude ───────────────────────────────────────────────────────────────────
 
@@ -1154,3 +1155,287 @@ export async function readProjectMemory(projectDir) {
   files.sort((a, b) => a.name.localeCompare(b.name));
   return { index, files };
 }
+
+export async function getSessionMeta(sessionId, agent, { claudeConfigDirs, codexHome, grokHome }) {
+  const a = (agent || 'claude').toLowerCase();
+  let cwd = null;
+  let display = null;
+  if (a === 'grok') {
+    const dir = await findGrokSessionDir(sessionId, grokHome);
+    if (dir) {
+      try {
+        const summary = JSON.parse(await fs.readFile(path.join(dir, 'summary.json'), 'utf8'));
+        cwd = summary.info?.cwd || null;
+        display = summary.session_summary || summary.info?.title || null;
+      } catch {}
+    }
+  } else if (a === 'codex') {
+    const file = await findCodexSessionFile(sessionId, codexHome);
+    if (file) {
+      const meta = await readCodexMeta(file);
+      cwd = meta.cwd;
+      const index = await loadCodexIndex(codexHome || path.join(os.homedir(), '.codex'));
+      const idx = index.get(sessionId);
+      display = idx?.thread_name || null;
+    }
+  } else {
+    // claude
+    const file = await findClaudeSessionFile(sessionId, claudeConfigDirs);
+    if (file) {
+      const meta = await readClaudeSessionMeta(file);
+      cwd = meta.cwd;
+      const nameMap = await loadClaudeHistoryNames(claudeConfigDirs);
+      display = nameMap.get(sessionId) || await readClaudeFirstMessage(file);
+    }
+  }
+  return { cwd, display };
+}
+
+export async function convertSession(sourceSessionId, sourceAgent, targetAgent, { claudeConfigDirs, codexHome, grokHome }) {
+  // 1. Get meta and messages from source session
+  const meta = await getSessionMeta(sourceSessionId, sourceAgent, { claudeConfigDirs, codexHome, grokHome });
+  const cwd = meta.cwd || null;
+  const display = meta.display || 'Converted Session';
+  
+  const bundle = await loadSessionMessages(sourceSessionId, sourceAgent, { claudeConfigDirs, codexHome, grokHome });
+  const messages = bundle.messages || [];
+
+  // 2. Generate target session ID
+  const targetSessionId = crypto.randomUUID();
+
+  // 3. Serialize messages to the target agent
+  const ta = targetAgent.toLowerCase();
+  
+  if (ta === 'claude') {
+    const configDir = claudeConfigDirs?.[0] || path.join(os.homedir(), '.claude');
+    const projectsDir = path.join(configDir, 'projects');
+    
+    // Attempt to find existing project folder with matching cwd
+    let projectDirName = null;
+    try {
+      const projectDirs = (await fs.readdir(projectsDir, { withFileTypes: true })).filter(e => e.isDirectory());
+      for (const dirEntry of projectDirs) {
+        const candidateProjDir = path.join(projectsDir, dirEntry.name);
+        const entries = await fs.readdir(candidateProjDir);
+        const jsonlFiles = entries.filter(e => e.endsWith('.jsonl') && !e.startsWith('agent-'));
+        for (const file of jsonlFiles) {
+          const m = await readClaudeSessionMeta(path.join(candidateProjDir, file));
+          if (m.cwd === cwd) {
+            projectDirName = dirEntry.name;
+            break;
+          }
+        }
+        if (projectDirName) break;
+      }
+    } catch {}
+    
+    if (!projectDirName) {
+      if (cwd) {
+        projectDirName = '-' + cwd.replace(/^\//, '').replace(/\//g, '-');
+      } else {
+        projectDirName = 'default-project';
+      }
+    }
+    
+    const targetDir = path.join(projectsDir, projectDirName);
+    await fs.mkdir(targetDir, { recursive: true });
+    
+    const targetFile = path.join(targetDir, `${targetSessionId}.jsonl`);
+    const lines = [];
+    let parentUuid = null;
+    let lastPromptText = '';
+    let lastLeafUuid = null;
+
+    for (const msg of messages) {
+      const ts = msg.ts ? new Date(msg.ts).toISOString() : new Date().toISOString();
+      const currentUuid = crypto.randomUUID();
+
+      if (msg.role === 'user') {
+        lastPromptText = msg.content || '';
+        lines.push(JSON.stringify({
+          parentUuid,
+          isSidechain: false,
+          promptId: crypto.randomUUID(),
+          type: 'user',
+          message: { role: 'user', content: msg.content },
+          uuid: currentUuid,
+          timestamp: ts,
+          permissionMode: 'default',
+          promptSource: 'sdk',
+          userType: 'external',
+          entrypoint: 'sdk-cli',
+          cwd,
+          sessionId: targetSessionId,
+          version: '2.1.177',
+          gitBranch: 'main'
+        }));
+        parentUuid = currentUuid;
+      } else if (msg.role === 'assistant') {
+        lines.push(JSON.stringify({
+          parentUuid,
+          isSidechain: false,
+          message: {
+            id: crypto.randomBytes(16).toString('hex'),
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: msg.content || '' }],
+            model: 'claude-3-5-sonnet',
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: { input_tokens: 0, output_tokens: 0 }
+          },
+          type: 'assistant',
+          uuid: currentUuid,
+          timestamp: ts,
+          userType: 'external',
+          entrypoint: 'sdk-cli',
+          cwd,
+          sessionId: targetSessionId,
+          version: '2.1.177',
+          gitBranch: 'main'
+        }));
+        parentUuid = currentUuid;
+        lastLeafUuid = currentUuid;
+      } else if (msg.role === 'tool' && msg.type === 'tool_use') {
+        lines.push(JSON.stringify({
+          parentUuid,
+          isSidechain: false,
+          message: {
+            id: crypto.randomBytes(16).toString('hex'),
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'tool_use', name: msg.name, input: msg.input || {} }],
+            model: 'claude-3-5-sonnet',
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: { input_tokens: 0, output_tokens: 0 }
+          },
+          type: 'assistant',
+          uuid: currentUuid,
+          timestamp: ts,
+          userType: 'external',
+          entrypoint: 'sdk-cli',
+          cwd,
+          sessionId: targetSessionId,
+          version: '2.1.177',
+          gitBranch: 'main'
+        }));
+        parentUuid = currentUuid;
+        lastLeafUuid = currentUuid;
+      }
+    }
+
+    if (lastPromptText && lastLeafUuid) {
+      lines.push(JSON.stringify({
+        type: 'last-prompt',
+        lastPrompt: lastPromptText,
+        leafUuid: lastLeafUuid,
+        sessionId: targetSessionId
+      }));
+    }
+
+    await fs.writeFile(targetFile, lines.join('\n') + '\n', 'utf8');
+    
+    // Also save history mapping
+    try {
+      const historyFile = path.join(configDir, 'history.jsonl');
+      await fs.appendFile(historyFile, JSON.stringify({
+        display,
+        pastedContents: {},
+        timestamp: Date.now(),
+        project: cwd,
+        sessionId: targetSessionId
+      }) + '\n', 'utf8');
+    } catch {}
+
+  } else if (ta === 'codex') {
+    const home = codexHome || path.join(os.homedir(), '.codex');
+    const targetDir = path.join(home, 'sessions');
+    await fs.mkdir(targetDir, { recursive: true });
+    
+    const targetFile = path.join(targetDir, `rollout-converted-${targetSessionId}.jsonl`);
+    const lines = [];
+    const baseTs = Date.now();
+    lines.push(JSON.stringify({
+      type: 'session_meta',
+      timestamp: baseTs,
+      payload: { id: targetSessionId, cwd }
+    }));
+    
+    for (const msg of messages) {
+      const ts = msg.ts || Date.now();
+      if (msg.role === 'user') {
+        lines.push(JSON.stringify({
+          type: 'response_item',
+          timestamp: ts,
+          payload: { type: 'message', role: 'user', content: [{ type: 'text', text: msg.content }] }
+        }));
+      } else if (msg.role === 'assistant') {
+        lines.push(JSON.stringify({
+          type: 'response_item',
+          timestamp: ts,
+          payload: { type: 'message', role: 'assistant', content: [{ type: 'text', text: msg.content }] }
+        }));
+      } else if (msg.role === 'tool' && msg.type === 'tool_use') {
+        lines.push(JSON.stringify({
+          type: 'response_item',
+          timestamp: ts,
+          payload: { type: 'function_call', name: msg.name, arguments: JSON.stringify(msg.input || {}) }
+        }));
+      }
+    }
+    await fs.writeFile(targetFile, lines.join('\n') + '\n', 'utf8');
+    
+    // Write index
+    try {
+      const indexFile = path.join(home, 'session_index.jsonl');
+      await fs.appendFile(indexFile, JSON.stringify({ id: targetSessionId, thread_name: display }) + '\n', 'utf8');
+    } catch {}
+
+  } else if (ta === 'grok') {
+    const home = grokHome || path.join(os.homedir(), '.grok');
+    const folderName = cwd ? encodeURIComponent(cwd) : 'default';
+    const targetDir = path.join(home, 'sessions', folderName, targetSessionId);
+    await fs.mkdir(targetDir, { recursive: true });
+    
+    const targetFile = path.join(targetDir, 'chat_history.jsonl');
+    const lines = [];
+    for (const msg of messages) {
+      const ts = msg.ts || Date.now();
+      if (msg.role === 'user') {
+        lines.push(JSON.stringify({
+          type: 'user',
+          content: msg.content,
+          timestamp: ts
+        }));
+      } else if (msg.role === 'assistant') {
+        lines.push(JSON.stringify({
+          type: 'assistant',
+          content: msg.content,
+          timestamp: ts
+        }));
+      } else if (msg.role === 'tool' && msg.type === 'tool_use') {
+        lines.push(JSON.stringify({
+          type: 'assistant',
+          content: '',
+          tool_calls: [{ name: msg.name, arguments: JSON.stringify(msg.input || {}) }],
+          timestamp: ts
+        }));
+      }
+    }
+    await fs.writeFile(targetFile, lines.join('\n') + '\n', 'utf8');
+    
+    const summaryFile = path.join(targetDir, 'summary.json');
+    await fs.writeFile(summaryFile, JSON.stringify({
+      session_summary: display,
+      info: {
+        cwd,
+        title: display
+      },
+      updated_at: new Date().toISOString()
+    }, null, 2), 'utf8');
+  }
+
+  return { targetSessionId };
+}
+
