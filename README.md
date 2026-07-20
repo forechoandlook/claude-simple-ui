@@ -151,9 +151,10 @@ MACHINE_TOKEN=shared-secret MACHINE_ID=build-b \
 
 In hub mode the UI:
 
-- **After login, you must pick a machine** (full-screen picker); top bar can switch later
-- Session list is filtered to that machine
-- Routes chat / files / git / shell to the selected machine
+- **Remembers** last machine in `localStorage` (no picker on every refresh)
+- Full-screen picker only when first time or last machine is offline
+- Top bar **Machines** menu: online/offline list + switch anytime
+- Session list is filtered to the selected machine
 
 An edge may still run `node server.js` for a **local-only** UI on that host (independent of the hub).
 

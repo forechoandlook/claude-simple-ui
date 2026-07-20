@@ -44,22 +44,36 @@ const AppShell = () => `
       <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
       <span id="btn-home" class="font-semibold text-sm hidden sm:inline cursor-pointer hover:text-primary transition-colors select-none">🤖 Agent UI</span>
       <span class="text-base-300 hidden sm:inline">/</span>
-      <select id="topbar-machine" class="select select-xs select-bordered font-mono text-xs max-w-[10rem] hidden"
-              title="Current edge machine"></select>
+      <div id="machine-menu-wrap" class="relative hidden flex-shrink-0">
+        <button type="button" id="btn-machine-menu" class="btn btn-ghost btn-xs border border-base-300 font-mono gap-1 max-w-[11rem]"
+                title="机器列表 / 切换">
+          <span id="topbar-machine-dot" class="w-1.5 h-1.5 rounded-full bg-success flex-shrink-0"></span>
+          <span id="topbar-machine-label" class="truncate">机器</span>
+          <span class="text-[10px] opacity-50">▾</span>
+        </button>
+        <div id="machine-menu" class="hidden absolute left-0 top-full mt-1 z-50 w-72 max-h-80 overflow-y-auto
+             rounded-lg border border-base-300 bg-base-100 shadow-xl p-2">
+          <div class="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-base-300">
+            <span class="text-[10px] uppercase tracking-wide text-base-content/45 font-semibold">Machines</span>
+            <button type="button" id="btn-refresh-machines-menu" class="btn btn-ghost btn-xs px-1 text-[10px]">↻</button>
+          </div>
+          <div id="machine-menu-list" class="flex flex-col gap-1"></div>
+          <p id="machine-menu-empty" class="text-xs text-base-content/40 px-1 py-2 hidden">暂无机器在线</p>
+        </div>
+      </div>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
       <div class="flex gap-2">
-        <button id="btn-switch-machine" class="btn btn-ghost btn-xs border border-base-300 hidden" title="Switch machine">机器</button>
         <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ New</button>
         <button id="btn-theme"        class="btn btn-ghost btn-xs border border-base-300">🌙</button>
         <button id="btn-settings"    class="btn btn-ghost btn-xs border border-base-300">⚙️</button>
         <button id="btn-logout"      class="btn btn-ghost btn-xs border border-base-300">Sign out</button>
       </div>
     </div>
-    <!-- Hub: pick a machine after login (before using the app) -->
+    <!-- Hub: only when no remembered machine (or last one offline) -->
     <div id="machine-picker" class="hidden fixed inset-0 z-[60] bg-base-100 flex items-center justify-center p-4">
       <div class="w-full max-w-md">
         <h2 class="text-xl font-bold mb-1">选择机器</h2>
-        <p class="text-sm text-base-content/55 mb-4">多机中心模式：请先选择一台业务机，之后的 session / 聊天 / 文件都在该机器上。</p>
+        <p class="text-sm text-base-content/55 mb-4">首次使用或上次选择的机器不在线时需要选择。之后会记住你的选择，也可随时在顶栏切换。</p>
         <div id="machine-picker-list" class="flex flex-col gap-2 mb-4"></div>
         <p id="machine-picker-empty" class="text-sm text-base-content/40 hidden">暂无在线机器。请在业务机上运行 <code class="text-xs">npm run client</code> 后点刷新。</p>
         <div class="flex items-center gap-2">
@@ -1244,7 +1258,10 @@ function showMachinePicker() {
   hubMachineReady.value = false;
   renderMachinePickerList();
   const status = $('machine-picker-status');
-  if (status) status.textContent = `${(machinesList.peek() || []).length} online`;
+  if (status) {
+    const n = (machinesList.peek() || []).filter(m => m.online !== false).length;
+    status.textContent = `${n} online`;
+  }
 }
 
 function hideMachinePicker() {
@@ -1252,35 +1269,99 @@ function hideMachinePicker() {
   hubMachineReady.value = true;
 }
 
-function syncTopbarMachine() {
-  const sel = $('topbar-machine');
-  const btn = $('btn-switch-machine');
-  if (!hubMode.peek()) {
-    sel?.classList.add('hidden');
-    btn?.classList.add('hidden');
-    return;
-  }
-  sel?.classList.remove('hidden');
-  btn?.classList.remove('hidden');
-  if (!sel) return;
-  const ms = machinesList.peek() || [];
-  const cur = selectedMachineId.peek() || '';
-  sel.innerHTML = ms.map(m =>
-    `<option value="${esc(m.id)}" ${m.id === cur ? 'selected' : ''}>${esc(m.id)}</option>`
-  ).join('') || '<option value="">(no machines)</option>';
-  if (cur) sel.value = cur;
+function closeMachineMenu() {
+  $('machine-menu')?.classList.add('hidden');
 }
 
-/** Enter hub app after user picks a machine. */
-async function enterMachine(machineId) {
+function renderMachineMenuList() {
+  const listEl = $('machine-menu-list');
+  const emptyEl = $('machine-menu-empty');
+  if (!listEl) return;
+  const ms = machinesList.peek() || [];
+  const cur = selectedMachineId.peek() || '';
+  if (!ms.length) {
+    listEl.innerHTML = '';
+    emptyEl?.classList.remove('hidden');
+    return;
+  }
+  emptyEl?.classList.add('hidden');
+  listEl.innerHTML = ms.map(m => {
+    const online = m.online !== false;
+    const active = m.id === cur;
+    const meta = [m.hostname, m.platform].filter(Boolean).join(' · ');
+    const since = m.connectedAt
+      ? new Date(m.connectedAt).toLocaleTimeString()
+      : '';
+    return `
+      <button type="button"
+        class="machine-menu-item w-full text-left px-2 py-1.5 rounded-md text-xs
+               ${active ? 'bg-primary/15 text-primary' : 'hover:bg-base-200'}
+               ${online ? '' : 'opacity-50'}"
+        data-pick-machine="${esc(m.id)}"
+        ${online ? '' : 'disabled'}>
+        <div class="flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full flex-shrink-0 ${online ? 'bg-success' : 'bg-error'}"></span>
+          <span class="font-mono font-semibold truncate flex-1">${esc(m.id)}</span>
+          ${active ? '<span class="text-[9px] opacity-70">当前</span>' : ''}
+          <span class="text-[9px] ${online ? 'text-success' : 'text-error'}">${online ? 'online' : 'offline'}</span>
+        </div>
+        ${meta || since ? `<div class="text-[10px] text-base-content/40 pl-3.5 mt-0.5 truncate">${esc(meta)}${since ? ' · ' + esc(since) : ''}</div>` : ''}
+      </button>`;
+  }).join('');
+}
+
+function syncTopbarMachine() {
+  const wrap = $('machine-menu-wrap');
+  const label = $('topbar-machine-label');
+  const dot = $('topbar-machine-dot');
+  if (!hubMode.peek()) {
+    wrap?.classList.add('hidden');
+    return;
+  }
+  wrap?.classList.remove('hidden');
+  const cur = selectedMachineId.peek() || '';
+  const ms = machinesList.peek() || [];
+  const info = ms.find(m => m.id === cur);
+  const online = info ? info.online !== false : false;
+  if (label) label.textContent = cur || '选择机器';
+  if (dot) {
+    dot.classList.toggle('bg-success', !!cur && online);
+    dot.classList.toggle('bg-warning', !!cur && !online);
+    dot.classList.toggle('bg-base-content/30', !cur);
+  }
+  renderMachineMenuList();
+}
+
+let _machinePollTimer = null;
+function startMachinePolling() {
+  if (_machinePollTimer) return;
+  _machinePollTimer = setInterval(async () => {
+    if (!hubMode.peek() || !ctx.token) return;
+    await refreshMachinesList();
+    syncTopbarMachine();
+    // If current machine went offline, warn in topbar label only (don't force picker)
+    const cur = selectedMachineId.peek();
+    if (cur) {
+      const m = (machinesList.peek() || []).find(x => x.id === cur);
+      if (m && m.online === false) {
+        const label = $('topbar-machine-label');
+        if (label) label.textContent = `${cur} (offline)`;
+      }
+    }
+  }, 15000);
+}
+
+/** Enter / switch hub machine. */
+async function enterMachine(machineId, { forceReload = false } = {}) {
   if (!machineId) return;
-  const switching = selectedMachineId.peek() && selectedMachineId.peek() !== machineId;
+  const prev = selectedMachineId.peek();
+  const switching = prev && prev !== machineId;
   setSelectedMachine(machineId);
   hideMachinePicker();
+  closeMachineMenu();
   syncTopbarMachine();
 
-  if (switching) {
-    // Leaving previous machine context
+  if (switching || forceReload) {
     try { ctx.ws?.close(); } catch {}
     ctx.ws = null;
     ctx.sessionId = null;
@@ -1289,7 +1370,7 @@ async function enterMachine(machineId) {
       sessionFilter.value = null;
       viewingFile.value = null;
     });
-    goHome();
+    if (switching) goHome();
   }
 
   const bar = $('topbar-project');
@@ -1298,6 +1379,7 @@ async function enterMachine(machineId) {
   }
 
   await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
+  hubMachineReady.value = true;
 }
 
 export async function showApp() {
@@ -1323,14 +1405,32 @@ export async function showApp() {
   }
 
   if (hubMode.peek()) {
-    // Always pick machine after login in hub mode
-    setSelectedMachine(null);
-    hubMachineReady.value = false;
     await refreshMachinesList();
+    const ms = machinesList.peek() || [];
+    const remembered = localStorage.getItem('machineId') || '';
+    const rememberedOnline = remembered && ms.some(m => m.id === remembered && m.online !== false);
+
+    if (rememberedOnline) {
+      // Restore last machine — no full-screen picker
+      setSelectedMachine(remembered);
+      hideMachinePicker();
+      syncTopbarMachine();
+      startMachinePolling();
+      await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
+      hubMachineReady.value = true;
+      const bar = $('topbar-project');
+      if (bar && bar.textContent === 'Select a session') {
+        bar.textContent = `Machine · ${remembered}`;
+      }
+      return;
+    }
+
+    // First time or remembered machine offline → full picker
+    setSelectedMachine(null);
     showMachinePicker();
-    // Load sessions after pick (enterMachine); still warm meta cache
     loadSessionMetaMap().catch(() => {});
     syncTopbarMachine();
+    startMachinePolling();
     return;
   }
 
@@ -1840,25 +1940,48 @@ export function initShell() {
     location.reload();
   });
 
-  // Hub machine picker
+  // Hub machines: full-screen picker (first time) + in-app menu (status + switch)
   delegate.on('click', '[data-pick-machine]', async (_, el) => {
-    await enterMachine(el.dataset.pickMachine);
+    const id = el.dataset.pickMachine;
+    if (!id || id === selectedMachineId.peek()) {
+      closeMachineMenu();
+      return;
+    }
+    await enterMachine(id, { forceReload: true });
   });
-  delegate.on('click', '#btn-refresh-machines', async () => {
+  const refreshMachinesUi = async () => {
     const st = $('machine-picker-status');
     if (st) st.textContent = '刷新中…';
     await refreshMachinesList();
     renderMachinePickerList();
-    if (st) st.textContent = `${(machinesList.peek() || []).length} online`;
+    renderMachineMenuList();
     syncTopbarMachine();
+    if (st) {
+      const n = (machinesList.peek() || []).filter(m => m.online !== false).length;
+      st.textContent = `${n} online`;
+    }
+  };
+  delegate.on('click', '#btn-refresh-machines', refreshMachinesUi);
+  delegate.on('click', '#btn-refresh-machines-menu', async e => {
+    e.stopPropagation();
+    await refreshMachinesUi();
   });
-  delegate.on('click', '#btn-switch-machine', async () => {
-    await refreshMachinesList();
-    showMachinePicker();
+  delegate.on('click', '#btn-machine-menu', async e => {
+    e.stopPropagation();
+    const menu = $('machine-menu');
+    if (!menu) return;
+    const open = menu.classList.contains('hidden');
+    if (open) {
+      await refreshMachinesList();
+      renderMachineMenuList();
+      menu.classList.remove('hidden');
+    } else {
+      menu.classList.add('hidden');
+    }
   });
-  delegate.on('change', '#topbar-machine', async (_, el) => {
-    if (!el.value || el.value === selectedMachineId.peek()) return;
-    await enterMachine(el.value);
+  document.addEventListener('click', e => {
+    const wrap = $('machine-menu-wrap');
+    if (wrap && !wrap.contains(e.target)) closeMachineMenu();
   });
 
   // Project Goal + Notes
