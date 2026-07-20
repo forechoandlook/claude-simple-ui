@@ -21,7 +21,7 @@ export const AuthScreen = () => `
     </div>
   </div>`;
 
-const AppShell = () => `
+export const AppShell = () => `
   <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-[9]"></div>
   <div id="app" class="${ctx.token ? '' : 'hidden'} flex-col flex-1 overflow-hidden" ${ctx.token ? 'style="display:flex"' : 'style="display:none"'}>
     <div class="flex items-center gap-2 px-3 bg-base-200 border-b border-base-300 flex-shrink-0" style="height:44px">
