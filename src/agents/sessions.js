@@ -131,8 +131,16 @@ export async function scanClaudeSessions(configDirs, filterCwd = null) {
   return results.flat();
 }
 
+// sessionId → absolute jsonl path (avoids re-scanning projects on every history load)
+const claudeFileCache = new Map();
+
 export async function findClaudeSessionFile(sessionId, configDirs) {
   if (!configDirs?.length) return null;
+  const cached = claudeFileCache.get(sessionId);
+  if (cached) {
+    try { await fs.access(cached); return cached; }
+    catch { claudeFileCache.delete(sessionId); }
+  }
   for (const configDir of configDirs) {
     const projectsDir = path.join(configDir, 'projects');
     let projectDirs;
@@ -140,8 +148,11 @@ export async function findClaudeSessionFile(sessionId, configDirs) {
     catch { continue; }
     for (const dir of projectDirs) {
       const candidate = path.join(projectsDir, dir, `${sessionId}.jsonl`);
-      try { await fs.access(candidate); return candidate; }
-      catch {}
+      try {
+        await fs.access(candidate);
+        claudeFileCache.set(sessionId, candidate);
+        return candidate;
+      } catch {}
     }
   }
   return null;

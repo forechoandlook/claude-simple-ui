@@ -6,6 +6,7 @@ import {
   hubMode, machinesList, selectedMachineId, setSelectedMachine,
   AGENT_DEFAULT_MODEL, AGENT_LABELS, ctx,
 } from '../state.js';
+// filesRoot/gitRoot used when starting a new session (default paths)
 import { api } from '../api.js';
 import { connectWS, clearMessages, appendSystemMsg, applyChatDensity } from '../chat.js';
 import { refreshModelSelect } from './session-list.js';
@@ -169,10 +170,16 @@ export async function startNewSession() {
     localStorage.setItem('model', currentModel.peek());
     refreshModelSelect();
     batch(() => {
-      currentProject.value = { id: name, name, path: result.path };
+      currentProject.value = { id: name, name, path: result.path, machineId: selectedMachineId.peek() || ctx.machineId };
       sessionFilter.value  = result.path;
+      filesRoot.value = result.path;
+      gitRoot.value = result.path;
+      filesPath.value = '';
+      viewingFile.value = null;
     });
     $('topbar-project').textContent = result.path;
+    const fi = $('files-root-input'); if (fi) fi.value = result.path;
+    const gi = $('git-root-input');   if (gi) gi.value = result.path;
     $('welcome').classList.add('hidden');
     const pv = $('project-view');
     pv.classList.remove('hidden');

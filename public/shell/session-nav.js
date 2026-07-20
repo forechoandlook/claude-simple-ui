@@ -34,9 +34,23 @@ function syncMachinePathHints(machineId) {
 }
 
 export function openProject(project) {
-  batch(() => { currentProject.value = project; sessionFilter.value = project.path; });
+  const path = project?.path || '';
+  batch(() => {
+    currentProject.value = project;
+    sessionFilter.value = path;
+    // Default Files/Git root = project path
+    if (path) {
+      filesRoot.value = path;
+      gitRoot.value = path;
+      filesPath.value = '';
+      viewingFile.value = null;
+    }
+  });
   ctx.sessionId = null;
-  $('topbar-project').textContent = project.path;
+  $('topbar-project').textContent = path || 'Project';
+  const fi = $('files-root-input'); if (fi && path) fi.value = path;
+  const gi = $('git-root-input');   if (gi && path) gi.value = path;
+  syncMachinePathHints(project?.machineId || selectedMachineId.peek() || ctx.machineId);
   $('welcome').classList.add('hidden');
   const pv = $('project-view');
   pv.classList.remove('hidden');
@@ -107,27 +121,124 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
   setAgent(resolvedAgent);
   refreshModelSelect();
 
-  const topLabel = resolvedMachine
-    ? `${resolvedCwd || sid}  @${resolvedMachine}`
-    : (resolvedCwd || sid);
-
-  // Resolve cwd on the *target edge machine* so Files/Git/Shell use that host's absolute path
+  // Default path = session cwd on the target machine (set immediately; no await)
   let edgeCwd = resolvedCwd;
+  applyProjectPaths(edgeCwd, resolvedMachine, sid);
+  connectWS();
+
+  // Background: normalize path on the edge (does not block chat)
   if (edgeCwd) {
-    try {
-      const r = await api('POST', '/api/resolve-path', { path: edgeCwd }, undefined, {
-        machineId: resolvedMachine || undefined,
-      });
-      if (r?.path) edgeCwd = r.path;
-      else if (r?.isDir === false) {
-        // keep original; may still be valid as session cwd
-      }
-    } catch {
-      // fall back to session-reported cwd (still on that machine)
-    }
+    api('POST', '/api/resolve-path', { path: edgeCwd }, undefined, {
+      machineId: resolvedMachine || undefined,
+    }).then(r => {
+      if (ctx.sessionId !== sid || !r?.path || r.path === edgeCwd) return;
+      edgeCwd = r.path;
+      applyProjectPaths(edgeCwd, resolvedMachine, sid);
+      setLastSessionContext({ sessionId: sid, cwd: edgeCwd });
+    }).catch(() => {});
   }
 
-  // Always open project shell + sync roots to the edge absolute path
+  // Switch to target tab BEFORE history (files/git/shell usable immediately)
+  clearMessages();
+  switchTab(targetTab);
+  {
+    const cur = sessionsData.peek();
+    sessionsData.value = Array.isArray(cur) ? [...cur] : [];
+  }
+
+  setLastSessionContext({
+    sessionId: sid,
+    cwd: edgeCwd || resolvedCwd,
+    configDir: resolvedConfig,
+    agent: resolvedAgent,
+    machineId: resolvedMachine,
+    tab: targetTab,
+  });
+
+  const label = AGENT_LABELS[resolvedAgent] || resolvedAgent;
+  const cacheKey = `${resolvedMachine || ''}:${resolvedAgent}:${sid}`;
+
+  const paintMessages = (msgs, context, meta = {}) => {
+    if (ctx.sessionId !== sid) return;
+    $('messages').innerHTML = '';
+    if (!msgs.length) {
+      appendSystemMsg(`${label} · ${sid.slice(0, 8)}… — no history`);
+      return;
+    }
+    flushToolBatch();
+    // Paint in chunks so the UI stays responsive on long histories
+    const CHUNK = 40;
+    let i = 0;
+    const paintChunk = () => {
+      if (ctx.sessionId !== sid) return;
+      const end = Math.min(i + CHUNK, msgs.length);
+      for (; i < end; i++) {
+        const m = msgs[i];
+        const ts = coerceTs(m.ts ?? m.timestamp);
+        if (m.type === 'text') {
+          if (m.role === 'assistant' || m.role === 'user') flushToolBatch();
+          appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : label, m.content, { ts });
+        } else if (m.type === 'tool_use') {
+          renderToolUse({ name: m.name, input: m.input ?? {} }, { ts });
+        } else if (m.type === 'token_usage') {
+          flushToolBatch();
+          appendHistoryTokenBar(m.usage);
+        }
+      }
+      if (i < msgs.length) {
+        requestAnimationFrame(paintChunk);
+        return;
+      }
+      flushToolBatch();
+      if (context) appendContextBar(context);
+      const turnCount = msgs.filter(m => m.type === 'token_usage').length
+        || msgs.filter(m => m.role === 'user').length;
+      const more = meta.truncated
+        ? ` (showing last ${msgs.length} of ${meta.total || '?'})`
+        : '';
+      appendSystemMsg(`── ${label} history · ${turnCount} turn${turnCount !== 1 ? 's' : ''}${more} ──`);
+    };
+    paintChunk();
+  };
+
+  const loadHistory = async () => {
+    // Instant re-open from in-memory cache
+    const cached = historyCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < HISTORY_CACHE_TTL) {
+      paintMessages(cached.msgs, cached.context, cached.meta);
+      return;
+    }
+    appendSystemMsg(`Loading ${label} history…`);
+    try {
+      // tail=120 → server returns only recent messages (much faster on long sessions)
+      const q = new URLSearchParams({ agent: resolvedAgent, tail: '120' });
+      const data = await api('GET', `/api/sessions/${sid}/messages?${q}`);
+      const msgs = Array.isArray(data) ? data : (data.messages || []);
+      const context = Array.isArray(data) ? null : (data.context || null);
+      const meta = Array.isArray(data) ? {} : { truncated: data.truncated, total: data.total };
+      historyCache.set(cacheKey, { msgs, context, meta, at: Date.now() });
+      paintMessages(msgs, context, meta);
+    } catch (e) {
+      if (ctx.sessionId !== sid) return;
+      $('messages').innerHTML = '';
+      appendSystemMsg(`${label} · ${sid.slice(0, 8)}… (history unavailable: ${e.message})`);
+    }
+  };
+
+  // Never block tab UI on history; chat still loads ASAP in background
+  if (skipHistory) {
+    loadHistory().catch(() => {});
+  } else {
+    // yield one frame so tab paint happens first
+    await new Promise(r => requestAnimationFrame(r));
+    loadHistory().catch(() => {});
+  }
+  syncHash();
+  renderSessionNotesBar();
+}
+
+/** Apply session cwd as default Files/Git/Shell root (target machine path). */
+function applyProjectPaths(edgeCwd, resolvedMachine, sid) {
   if (edgeCwd) {
     const name = edgeCwd.split('/').filter(Boolean).pop() || edgeCwd;
     batch(() => {
@@ -138,7 +249,6 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
         machineId: resolvedMachine,
       };
       sessionFilter.value = edgeCwd;
-      // Files/Git roots = session cwd on the selected machine (not hub, not empty)
       filesRoot.value = edgeCwd;
       gitRoot.value = edgeCwd;
       filesPath.value = '';
@@ -160,9 +270,7 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
       pv.style.minHeight = '0';
       pv.style.overflow = 'hidden';
     }
-    connectWS();
   } else {
-    // Still open project shell so files tab can show path input
     $('welcome')?.classList.add('hidden');
     const pv = $('project-view');
     if (pv) {
@@ -174,74 +282,11 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
     }
     syncMachinePathHints(resolvedMachine);
   }
-
-  // Switch to target tab BEFORE history (files/git/shell usable immediately)
-  clearMessages();
-  switchTab(targetTab);
-  {
-    const cur = sessionsData.peek();
-    sessionsData.value = Array.isArray(cur) ? [...cur] : [];
-  }
-
-  setLastSessionContext({
-    sessionId: sid,
-    cwd: edgeCwd || resolvedCwd,
-    configDir: resolvedConfig,
-    agent: resolvedAgent,
-    machineId: resolvedMachine,
-    tab: targetTab,
-  });
-
-  const label = AGENT_LABELS[resolvedAgent] || resolvedAgent;
-
-  const loadHistory = async () => {
-    appendSystemMsg(`Loading ${label} history…`);
-    try {
-      const q = new URLSearchParams({ agent: resolvedAgent });
-      const data = await api('GET', `/api/sessions/${sid}/messages?${q}`);
-      const msgs = Array.isArray(data) ? data : (data.messages || []);
-      const context = Array.isArray(data) ? null : (data.context || null);
-      // If user already navigated away from this session, skip paint
-      if (ctx.sessionId !== sid) return;
-      $('messages').innerHTML = '';
-      if (!msgs.length) {
-        appendSystemMsg(`${label} · ${sid.slice(0, 8)}… — no history`);
-      } else {
-        flushToolBatch();
-        for (const m of msgs) {
-          const ts = coerceTs(m.ts ?? m.timestamp);
-          if (m.type === 'text') {
-            if (m.role === 'assistant' || m.role === 'user') flushToolBatch();
-            appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : label, m.content, { ts });
-          } else if (m.type === 'tool_use') {
-            renderToolUse({ name: m.name, input: m.input ?? {} }, { ts });
-          } else if (m.type === 'token_usage') {
-            flushToolBatch();
-            appendHistoryTokenBar(m.usage);
-          }
-        }
-        flushToolBatch();
-        if (context) appendContextBar(context);
-        const turnCount = msgs.filter(m => m.type === 'token_usage').length
-          || msgs.filter(m => m.role === 'user').length;
-        appendSystemMsg(`── ${label} history · ${turnCount} turn${turnCount !== 1 ? 's' : ''} ──`);
-      }
-    } catch (e) {
-      if (ctx.sessionId !== sid) return;
-      $('messages').innerHTML = '';
-      appendSystemMsg(`${label} · ${sid.slice(0, 8)}… (history unavailable: ${e.message})`);
-    }
-  };
-
-  if (skipHistory) {
-    // Background: history ready when user opens Chat
-    loadHistory().catch(() => {});
-  } else {
-    await loadHistory();
-  }
-  syncHash();
-  renderSessionNotesBar();
 }
+
+// In-memory chat history cache (instant re-open within TTL)
+const historyCache = new Map();
+const HISTORY_CACHE_TTL = 3 * 60 * 1000;
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 export function switchTab(name) { currentTab.value = name; }

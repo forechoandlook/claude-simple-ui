@@ -726,13 +726,20 @@ export function createApp() {
       const { sessionId } = req.params;
       if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
       const preferred = typeof req.query.agent === 'string' ? req.query.agent : null;
+      // tail=0 → full history; default last 120 messages for fast first paint
+      let tail = parseInt(req.query.tail ?? '120', 10);
+      if (Number.isNaN(tail)) tail = 120;
+      if (tail < 0) tail = 0;
+      if (tail > 2000) tail = 2000;
       const opts = {
         claudeConfigDirs: CLAUDE_CONFIG_DIRS,
         codexHome: CODEX_HOME,
         grokHome: GROK_HOME,
       };
-      // Try preferred agent first, then fall back across all agents (stale cache / missing ?agent=)
-      const order = [...new Set([preferred, ...ENABLED_AGENTS, 'claude', 'codex', 'grok'].filter(Boolean))];
+      // Prefer stated agent; only fall back if not found (avoids scanning all agents every time)
+      const order = preferred
+        ? [preferred, ...ENABLED_AGENTS.filter(a => a !== preferred)]
+        : [...ENABLED_AGENTS];
       let bundle = null;
       for (const a of order) {
         bundle = await loadSessionMessages(sessionId, a, opts);
@@ -740,14 +747,25 @@ export function createApp() {
       }
       if (!bundle) return res.status(404).json({ error: 'Session not found' });
       // Normalize: always { messages, context, agent }
-      const payload = Array.isArray(bundle)
-        ? { messages: bundle, context: null, agent: preferred || 'claude' }
-        : {
-            messages: bundle.messages || [],
-            context: bundle.context || null,
-            agent: bundle.agent || preferred || 'claude',
-          };
+      let messages = Array.isArray(bundle)
+        ? bundle
+        : (bundle.messages || []);
+      const total = messages.length;
+      let truncated = false;
+      if (tail > 0 && messages.length > tail) {
+        messages = messages.slice(-tail);
+        truncated = true;
+      }
+      const payload = {
+        messages,
+        context: Array.isArray(bundle) ? null : (bundle.context || null),
+        agent: Array.isArray(bundle) ? (preferred || 'claude') : (bundle.agent || preferred || 'claude'),
+        total,
+        truncated,
+        tail: truncated ? tail : total,
+      };
       res.setHeader('X-Session-Agent', payload.agent);
+      res.setHeader('Cache-Control', 'private, max-age=30');
       res.json(payload);
     } catch (e) {
       res.status(500).json({ error: e.message });
