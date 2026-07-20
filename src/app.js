@@ -23,6 +23,7 @@ import {
   toClientSession,
   convertSession,
 } from './agents/sessions.js';
+import { createMetaAgent } from './agents/meta-agent.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
 
@@ -845,6 +846,227 @@ export function createApp() {
       res.json({ graph, commits });
     } catch (e) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ─── Meta Agent (built-in AI: reports, Q&A, VLM, code run) ───────────────────
+  const meta = createMetaAgent({
+    rootDir,
+    listSessions,
+    searchActivity,
+    loadSessionMessages,
+    groupByProject,
+    toClientSession,
+    getProjectNotesStore: loadProjectNotes,
+    saveProjectNotesStore: saveProjectNotes,
+    normalizeProjectEntry,
+    git,
+    isGitRepo,
+    claudeConfigDirs: () => CLAUDE_CONFIG_DIRS,
+    codexHome: () => CODEX_HOME,
+    grokHome: () => GROK_HOME,
+  });
+
+  /** Write SSE event */
+  function sseWrite(res, event, data) {
+    if (res.writableEnded) return;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  app.get('/api/ai/config', authMiddleware, async (_req, res) => {
+    try {
+      const c = await meta.loadConfig();
+      res.json(meta.publicConfig(c));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put('/api/ai/config', authMiddleware, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const patch = {};
+      for (const k of [
+        'url', 'model', 'key', 'vlm_url', 'vlm_key', 'vlm_model',
+        'temperature', 'system', 'auto_report', 'auto_report_hour', 'auto_report_days',
+      ]) {
+        if (body[k] !== undefined) patch[k] = body[k];
+      }
+      // empty key string = keep existing
+      if (patch.key === '' || patch.key === '***') delete patch.key;
+      if (patch.vlm_key === '' || patch.vlm_key === '***') delete patch.vlm_key;
+      const pub = await meta.saveConfig(patch);
+      res.json(pub);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/ai/reports', authMiddleware, async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit || '30', 10) || 30, 100);
+      res.json({ reports: await meta.listReports(limit) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/ai/reports/:day', authMiddleware, async (req, res) => {
+    try {
+      const r = await meta.getReport(req.params.day);
+      if (!r) return res.status(404).json({ error: 'not found' });
+      res.json(r);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/ai/digest', authMiddleware, async (req, res) => {
+    try {
+      const days = Math.min(parseInt(req.query.days || '1', 10) || 1, 30);
+      const agent = typeof req.query.agent === 'string' ? req.query.agent : null;
+      const includeMessages = req.query.messages !== '0';
+      const digest = await meta.buildDigest({ days, agent, includeMessages });
+      res.json(digest);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // SSE: generate work report
+  app.post('/api/ai/report', authMiddleware, async (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+    const days = Math.min(parseInt(req.body?.days || '1', 10) || 1, 14);
+    try {
+      const result = await meta.generateReport({
+        days,
+        onContent: (content) => sseWrite(res, 'content', { content }),
+        onTool: (name, args, phase, result, id) => {
+          sseWrite(res, 'tool', { name, args, phase, result: phase === 'start' ? undefined : result, id });
+        },
+      });
+      sseWrite(res, 'done', {
+        content: result.content,
+        digest: result.digest?.totals,
+      });
+    } catch (e) {
+      sseWrite(res, 'error', { message: String(e.message || e) });
+    } finally {
+      res.end();
+    }
+  });
+
+  app.get('/api/ai/sessions', authMiddleware, async (_req, res) => {
+    try {
+      res.json({ sessions: await meta.listChatSessions() });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/ai/sessions/:id', authMiddleware, async (req, res) => {
+    try {
+      const s = await meta.getChatSession(req.params.id);
+      if (!s) return res.status(404).json({ error: 'not found' });
+      res.json(s);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/ai/sessions/:id', authMiddleware, async (req, res) => {
+    try {
+      await meta.deleteChatSession(req.params.id);
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // SSE: multi-turn agent chat (text only; images arrive as [imgN](path) refs → analyze_images)
+  app.post('/api/ai/chat', authMiddleware, async (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    try {
+      const {
+        message,
+        sessionId,
+        newSession = false,
+      } = req.body || {};
+
+      const text = String(message || '').trim();
+      if (!text) {
+        sseWrite(res, 'error', { message: 'message required（图片请先粘贴为 [imgN](路径) 再发送）' });
+        return res.end();
+      }
+
+      const cfg = await meta.loadConfig();
+
+      let session = null;
+      if (sessionId && !newSession) {
+        session = await meta.getChatSession(sessionId);
+      }
+      if (!session) {
+        session = {
+          id: crypto.randomUUID(),
+          title: text.replace(/\s+/g, ' ').trim().slice(0, 40) || '对话',
+          messages: [],
+          createdAt: Date.now(),
+        };
+      }
+
+      session.messages.push({ role: 'user', content: text });
+      // Track VLM threads used in this chat for resume/debug
+      if (!Array.isArray(session.vlmThreadIds)) session.vlmThreadIds = [];
+      const msgs = [
+        { role: 'system', content: cfg.system || meta.DEFAULT_SYSTEM },
+        ...session.messages.filter((m) => m.role !== 'system'),
+      ];
+
+      sseWrite(res, 'session', { id: session.id, title: session.title });
+
+      const result = await meta.runLoop(msgs, {
+        chatSessionId: session.id,
+        onContent: (content) => sseWrite(res, 'content', { content }),
+        onTool: (name, args, phase, toolResult, id) => {
+          if (name === 'analyze_images' && phase === 'done' && toolResult?.thread_id) {
+            if (!session.vlmThreadIds.includes(toolResult.thread_id)) {
+              session.vlmThreadIds.push(toolResult.thread_id);
+            }
+          }
+          sseWrite(res, 'tool', {
+            name,
+            args,
+            phase,
+            id,
+            result: phase === 'start' ? undefined : toolResult,
+          });
+        },
+        cfg,
+      });
+
+      session.messages = result.messages.filter((m) => m.role !== 'system');
+      // keep first-user-message title stable unless still default
+      if (!session.title || session.title === '对话') {
+        session.title = text.replace(/\s+/g, ' ').trim().slice(0, 40) || session.title;
+      }
+      await meta.saveChatSession(session);
+
+      sseWrite(res, 'done', {
+        content: result.content,
+        sessionId: session.id,
+        title: session.title,
+      });
+    } catch (e) {
+      sseWrite(res, 'error', { message: String(e.message || e) });
+    } finally {
+      res.end();
     }
   });
 

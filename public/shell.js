@@ -20,6 +20,7 @@ import {
 } from './chat.js';
 import { syncHash } from './router.js';
 import { initSettings, openSettings } from './settings.js';
+import { openMetaAgent, toggleMetaAgent } from './agent-panel.js';
 
 import { AuthScreen, AppShell } from './shell/templates.js';
 import { updateDashboard, shiftCalMonth, setSelectedCalDate } from './shell/dashboard.js';
@@ -282,6 +283,8 @@ export function initShell(opts = {}) {
     appendSystemMsg(`Project · ${cwd}`);
   });
   delegate.on('click', '#btn-settings', openSettings);
+  delegate.on('click', '#btn-meta-agent', () => toggleMetaAgent());
+  delegate.on('click', '#btn-meta-agent-welcome', () => openMetaAgent('chat'));
   delegate.on('click', '#btn-theme', toggleTheme);
 
   delegate.on('click', '#btn-cal-prev', () => {

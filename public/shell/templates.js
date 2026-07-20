@@ -62,6 +62,7 @@ export const AppShell = (opts = {}) => {
       </div>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
       <div class="flex gap-2">
+        <button id="btn-meta-agent"  class="btn btn-ghost btn-xs border border-primary/40 text-primary" title="Meta Agent — 报告 / 问答 / VLM">✦ Agent</button>
         <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ New</button>
         <button id="btn-theme"        class="btn btn-ghost btn-xs border border-base-300">🌙</button>
         <button id="btn-settings"    class="btn btn-ghost btn-xs border border-base-300">⚙️</button>
@@ -129,7 +130,10 @@ export const AppShell = (opts = {}) => {
           <div class="max-w-4xl w-full text-center flex flex-col items-center gap-2 mt-2 md:mt-4">
             <h2 class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent select-none">🤖 Agent UI</h2>
             <p class="text-sm text-base-content/65 max-w-md">Claude · Codex · Grok — Select a session from the sidebar or click a day on the calendar to view activity.</p>
-            <button id="btn-new-session-welcome" class="btn btn-primary btn-sm mt-0.5 shadow-md">＋ New Session</button>
+            <div class="flex gap-2 mt-0.5">
+              <button id="btn-new-session-welcome" class="btn btn-primary btn-sm shadow-md">＋ New Session</button>
+              <button id="btn-meta-agent-welcome" class="btn btn-outline btn-primary btn-sm">✦ Meta Agent</button>
+            </div>
           </div>
           
           <!-- Stats Banner -->

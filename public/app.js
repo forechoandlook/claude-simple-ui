@@ -8,6 +8,7 @@ import { initGitTab } from './git.js';
 import { initSettings } from './settings.js';
 import { initTerminal } from './terminal.js';
 import { initImagePaste } from './chat.js';
+import { initMetaAgent } from './agent-panel.js';
 import { initRouter, applyInitialRoute, parseHashPath } from './router.js';
 
 function markBootReady() {
@@ -34,6 +35,7 @@ initGitTab();
 initSettings();
 initTerminal();
 initImagePaste();
+initMetaAgent();
 initRouter(resumeSession, switchTab);
 
 // 3. Boot data

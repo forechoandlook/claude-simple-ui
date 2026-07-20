@@ -117,6 +117,35 @@ Edge-only env (when connecting to a hub):
 - **Git**: status, staged/unstaged diff, graph log; custom root
 - **Shell**: interactive PTY via xterm.js + Python helper (`vim` / `htop` etc.)
 
+### Meta Agent（内置 AI 助手）
+
+Top bar **✦ Agent** — OpenAI-compatible tool agent (DeepSeek / OpenAI / local gateway…).
+
+| Feature | Description |
+|---------|-------------|
+| **工作报告** | 手动生成今日 / 近 N 日「我做了啥」；可选整点自动日报 |
+| **项目问答** | 搜会话、读摘要、项目 goal/notes、git status/log |
+| **代码** | `write_file` + `run_command` 生成并运行（有危险命令拦截） |
+| **VLM** | 粘贴/选图 → 上传为 `[imgN](路径)` 文本引用；需要时 `analyze_images`；`thread_id` 支持多轮追问 |
+
+API Key 存在服务端 `.ai_config.json`（已 gitignore）。配置入口：Agent 面板 ⚙。
+
+**Session 持久化（同一 sessionId；多图 = 多个 VLM thread 文件）**
+
+```
+.ai/sessions/                       # 或 AI_DATA_DIR/sessions
+  index.json
+  {sessionId}/
+    meta.json
+    messages.jsonl                  # 对话（一行一条，含 tool）
+    vlm/
+      {threadId}.jsonl              # 每个看图线程单独文件
+                                    # 多图/多次 analyze → 多个 threadId
+                                    # 文件内多行 = 该线程的多轮追问
+```
+
+删除会话会整目录删除。旧版 `session.json`、`vlm.jsonl`、`vlm/*.json`、全局 `.ai/vlm/` 会自动迁移。
+
 ## Multi-machine (optional)
 
 Only needed when sessions live on **several hosts** and you want **one public WebUI**.

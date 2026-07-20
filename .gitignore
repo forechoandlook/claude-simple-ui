@@ -9,4 +9,9 @@ tmp
 .credentials.json
 .project_notes.json
 .session_meta.json
+.ai_config.json
+.ai_reports.json
+.ai_sessions.json
+.ai_sessions.json.migrated
+.ai/
 gateway/dist/
