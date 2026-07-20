@@ -572,8 +572,17 @@ func (g *gateway) handleHubBrowserWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "machine query required", http.StatusBadRequest)
 		return
 	}
-	// Edge accepts MACHINE_TOKEN as hub-forwarded auth
-	edgeQuery := "token=" + url.QueryEscape(g.token) + "&hub=1"
+	// Edge accepts MACHINE_TOKEN as hub-forwarded auth.
+	// Preserve shell/chat query params (cwd, cols, rows, …); drop browser token/machine.
+	q := url.Values{}
+	q.Set("token", g.token)
+	q.Set("hub", "1")
+	for _, key := range []string{"cwd", "cols", "rows", "sessionId", "agent"} {
+		if v := r.URL.Query().Get(key); v != "" {
+			q.Set(key, v)
+		}
+	}
+	edgeQuery := "?" + q.Encode()
 	g.openBrowserTunnel(w, r, machineID, r.URL.Path, edgeQuery)
 }
 

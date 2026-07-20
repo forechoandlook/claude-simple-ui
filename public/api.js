@@ -1,36 +1,29 @@
 // api.js — HTTP + WebSocket helpers
-import { ctx, hubMode } from './state.js';
+import { ctx, hubMode, selectedMachineId } from './state.js';
 
-/** Paths the hub answers without routing to a single edge machine. */
-function isHubLocalPath(path) {
+/** Active edge machine id (hub). */
+export function currentMachineId(opts = {}) {
+  if (opts.machineId !== undefined) return opts.machineId;
+  return ctx.machineId || selectedMachineId.peek() || null;
+}
+
+/** Hub endpoints that must NOT be proxied to an edge. */
+function isHubOnlyPath(path) {
   const p = path.split('?')[0];
-  if (p === '/api/hub' || p === '/api/machines') return true;
-  if (p.startsWith('/api/auth/')) return true;
-  if (p === '/api/sessions' || p === '/api/projects' || p === '/api/activity') return true;
-  if (p === '/api/sessions/meta') return true; // GET aggregate; PUT still adds X-Machine-Id below
-  return false;
+  return p === '/api/hub'
+    || p === '/api/machines'
+    || p.startsWith('/api/auth/');
 }
 
 export async function api(method, path, body, signal, opts = {}) {
-  const machineId = opts.machineId !== undefined ? opts.machineId : ctx.machineId;
+  const machineId = currentMachineId(opts);
   const headers = {
     'Content-Type': 'application/json',
     ...(ctx.token ? { Authorization: `Bearer ${ctx.token}` } : {}),
   };
 
-  const p0 = path.split('?')[0];
-  // Prefer single-machine fan-out when we already know the edge (much faster)
-  const singleMachineList = hubMode.peek() && machineId && method === 'GET' && (
-    p0 === '/api/sessions' || p0 === '/api/projects' || p0 === '/api/workspaces'
-  );
-  const hubLocalGet = isHubLocalPath(path) && method === 'GET' && !singleMachineList;
-  const needsMachine = hubMode.peek() && (!hubLocalGet || singleMachineList) && machineId
-    && !(hubLocalGet && p0.startsWith('/api/auth'));
-  if (needsMachine || singleMachineList) {
-    if (machineId) headers['X-Machine-Id'] = machineId;
-  }
-  // session meta PUT must go to the selected machine
-  if (hubMode.peek() && p0 === '/api/sessions/meta' && method !== 'GET' && machineId) {
+  // Hub mode: route data APIs to the selected edge (sessions/files/git/…)
+  if (hubMode.peek() && machineId && !isHubOnlyPath(path)) {
     headers['X-Machine-Id'] = machineId;
   }
 
@@ -49,6 +42,24 @@ export function sendWs(data) {
   if (ctx.ws?.readyState === WebSocket.OPEN) ctx.ws.send(JSON.stringify(data));
 }
 
+/** Query string for download links (token + machine in hub mode). */
+export function authQuery(extra = {}) {
+  const q = new URLSearchParams(extra);
+  if (ctx.token) q.set('token', ctx.token);
+  const mid = currentMachineId();
+  if (hubMode.peek() && mid) q.set('machine', mid);
+  return q.toString();
+}
+
+/** Headers for raw fetch (e.g. file upload) in hub mode. */
+export function authHeaders(extra = {}) {
+  const h = { ...extra };
+  if (ctx.token) h.Authorization = `Bearer ${ctx.token}`;
+  const mid = currentMachineId();
+  if (hubMode.peek() && mid) h['X-Machine-Id'] = mid;
+  return h;
+}
+
 export async function probeHub() {
   try {
     const res = await fetch('/api/hub');
@@ -61,7 +72,7 @@ export async function probeHub() {
       hubMode.value = true;
       return data;
     }
-  } catch { /* standalone edge / local */ }
+  } catch { /* standalone */ }
   hubMode.value = false;
   return false;
 }

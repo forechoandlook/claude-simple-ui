@@ -1,7 +1,7 @@
 // files.js — Files tab with upload / download / delete + text/office preview
 import { effect, delegate, esc, $ } from './lib.js';
 import { currentProject, currentTab, filesRoot, filesPath, viewingFile, ctx } from './state.js';
-import { api } from './api.js';
+import { api, authHeaders, authQuery } from './api.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fileIcon(name) {
@@ -117,7 +117,9 @@ function fileChrome(path, size, kindLabel) {
 
 // ── Directory / text render ───────────────────────────────────────────────────
 function renderDir(files) {
-  if (!files.length) return '<div class="p-4 text-xs text-base-content/40">Empty directory</div>';
+  if (!Array.isArray(files) || !files.length) {
+    return '<div class="p-4 text-xs text-base-content/40">Empty directory</div>';
+  }
   files.sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name));
   return files.map(f => `
     <div class="flex items-center gap-2 px-4 py-1.5 hover:bg-base-300 group"
@@ -325,7 +327,7 @@ function triggerUpload() {
       try {
         const res = await fetch(url, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${ctx.token}` },
+          headers: authHeaders(),
           body: file,
           duplex: 'half',
         });
@@ -344,7 +346,12 @@ function triggerUpload() {
 function downloadFile(proj, filePath) {
   const root = filesRoot.peek() || proj?.path || '';
   const id = proj?.id || '_';
-  const url = `/api/projects/${id}/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(filePath)}&download=true&token=${encodeURIComponent(ctx.token)}`;
+  const qs = authQuery({
+    root,
+    path: filePath,
+    download: 'true',
+  });
+  const url = `/api/projects/${id}/file?${qs}`;
   const a = document.createElement('a');
   a.href = url;
   a.download = filePath.split('/').pop();
@@ -409,7 +416,11 @@ export function initFilesTab() {
     const area = $('files-area');
     if (!area) return;
     const ctrl = new AbortController();
-    if (tab !== 'files' || !root) { area.innerHTML = ''; return () => ctrl.abort(); }
+    if (tab !== 'files') { return () => ctrl.abort(); }
+    if (!root) {
+      area.innerHTML = '<div class="p-4 text-xs text-base-content/40">Enter a project root above, or open a session with a working directory.</div>';
+      return () => ctrl.abort();
+    }
     const id = proj?.id || '_';
     area.innerHTML = '<div class="p-4 text-xs text-base-content/40">Loading…</div>';
     if (file !== null) {
@@ -422,7 +433,15 @@ export function initFilesTab() {
         });
     } else {
       api('GET', `/api/projects/${id}/files?root=${encodeURIComponent(root)}&path=${encodeURIComponent(dir)}`, undefined, ctrl.signal)
-        .then(d => { if (!ctrl.signal.aborted) area.innerHTML = renderDir(d); })
+        .then(d => {
+          if (ctrl.signal.aborted) return;
+          const list = Array.isArray(d) ? d : (Array.isArray(d?.files) ? d.files : null);
+          if (!list) {
+            area.innerHTML = `<div class="p-4 text-xs text-error">${esc(d?.error || 'Invalid directory listing')}</div>`;
+            return;
+          }
+          area.innerHTML = renderDir(list);
+        })
         .catch(e => {
           if (!ctrl.signal.aborted && e?.name !== 'AbortError') {
             area.innerHTML = `<div class="p-4 text-xs text-error">${esc(e.message)}</div>`;

@@ -70,7 +70,11 @@ export function initGitTab() {
     const area = $('git-area');
     if (!area) return;
     const ctrl = new AbortController();
-    if (tab !== 'git' || !root) { area.innerHTML = ''; return () => ctrl.abort(); }
+    if (tab !== 'git') return () => ctrl.abort();
+    if (!root) {
+      area.innerHTML = '<div class="p-4 text-sm text-base-content/50">Enter a project root above, or open a session with a working directory.</div>';
+      return () => ctrl.abort();
+    }
     const id = proj?.id || '_';
     area.innerHTML = '<div class="p-4 text-xs text-base-content/40">Loading…</div>';
     api('GET', `/api/projects/${id}/git/status?root=${encodeURIComponent(root)}`, undefined, ctrl.signal)

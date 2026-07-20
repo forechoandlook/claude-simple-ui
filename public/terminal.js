@@ -1,11 +1,13 @@
 // terminal.js — Shell tab: persistent bash via WebSocket (with xterm.js)
 import { $, watch } from './lib.js';
-import { currentProject, currentTab, ctx } from './state.js';
+import { currentProject, currentTab, ctx, hubMode, selectedMachineId } from './state.js';
 
 let ws        = null;
 let term      = null;
 let fitAddon  = null;
 let connected = false;
+let lastCwd   = null;
+let lastMachine = null;
 
 function initXterm() {
   if (term) return;
@@ -51,9 +53,7 @@ function initXterm() {
   }
 
   term.open(container);
-  try {
-    if (fitAddon) fitAddon.fit();
-  } catch (e) {}
+  fitTerminal();
 
   term.onData(data => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -62,13 +62,15 @@ function initXterm() {
   });
 
   window.addEventListener('resize', () => {
-    try {
-      if (fitAddon) {
-        fitAddon.fit();
-        sendResize();
-      }
-    } catch (e) {}
+    fitTerminal();
+    sendResize();
   });
+}
+
+function fitTerminal() {
+  try {
+    if (fitAddon && term) fitAddon.fit();
+  } catch { /* container may be hidden */ }
 }
 
 function sendResize() {
@@ -81,16 +83,28 @@ function sendResize() {
   }
 }
 
+function activeMachine() {
+  return ctx.machineId || selectedMachineId.peek() || null;
+}
+
 function connect(cwd) {
-  if (ws) { ws.close(); ws = null; }
+  if (ws) { try { ws.close(); } catch {} ws = null; }
   connected = false;
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const cwdParam = cwd ? `&cwd=${encodeURIComponent(cwd)}` : '';
   const cols = term ? term.cols : 80;
   const rows = term ? term.rows : 24;
-  let q = `token=${encodeURIComponent(ctx.token || '')}${cwdParam}&cols=${cols}&rows=${rows}`;
-  if (ctx.machineId) q += `&machine=${encodeURIComponent(ctx.machineId)}`;
+  const q = new URLSearchParams();
+  if (ctx.token) q.set('token', ctx.token);
+  if (cwd) q.set('cwd', cwd);
+  q.set('cols', String(cols));
+  q.set('rows', String(rows));
+  const mid = activeMachine();
+  if (hubMode.peek() && mid) q.set('machine', mid);
+
+  lastCwd = cwd || null;
+  lastMachine = mid;
+
   ws = new WebSocket(`${proto}://${location.host}/ws/shell?${q}`);
 
   ws.addEventListener('open', () => {
@@ -100,13 +114,14 @@ function connect(cwd) {
   });
 
   ws.addEventListener('message', e => {
-    const msg = JSON.parse(e.data);
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'output') {
       term?.write(msg.data);
     } else if (msg.type === 'exit') {
       term?.write(`\r\n\x1b[33m[process exited: ${msg.code}]\x1b[0m\r\n`);
     } else if (msg.type === 'error') {
-      term?.write(`\r\n\x1b[31m[error: ${msg.data}]\x1b[0m\r\n`);
+      term?.write(`\r\n\x1b[31m[error: ${msg.data || msg.message || ''}]\x1b[0m\r\n`);
     }
   });
 
@@ -120,26 +135,39 @@ function connect(cwd) {
   });
 }
 
-export function initTerminal() {
-  initXterm();
+function activateShellTab() {
+  const cwd = currentProject.peek()?.path;
+  const cwdEl = $('term-cwd');
+  if (cwdEl) cwdEl.textContent = cwd || '~';
 
-  watch(currentTab, tab => {
-    if (tab === 'shell') {
-      const cwd = currentProject.peek()?.path;
-      const cwdEl = $('term-cwd');
-      if (cwdEl) cwdEl.textContent = cwd || '~';
-      
-      if (!term) {
-        initXterm();
+  if (!term) initXterm();
+
+  // Double rAF: layout is ready after tab becomes visible
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      fitTerminal();
+      const mid = activeMachine();
+      const needReconnect = !connected
+        || lastCwd !== (cwd || null)
+        || lastMachine !== mid;
+      if (needReconnect) {
+        term?.clear();
+        connect(cwd);
+      } else {
+        sendResize();
       }
-      
-      setTimeout(() => {
-        try {
-          if (fitAddon) fitAddon.fit();
-        } catch (e) {}
-        if (!connected) connect(cwd);
-      }, 100);
-    }
+    });
+  });
+}
+
+export function initTerminal() {
+  // Defer xterm until first visit to shell (container must be measurable)
+  watch(currentTab, tab => {
+    if (tab === 'shell') activateShellTab();
+  });
+
+  document.addEventListener('shell-tab-shown', () => {
+    if (currentTab.peek() === 'shell') activateShellTab();
   });
 
   document.getElementById('term-reconnect')?.addEventListener('click', () => {

@@ -24,11 +24,13 @@ function stickBottom(el, force) {
 export function connectWS() {
   ctx.ws?.close();
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  let q = `token=${encodeURIComponent(ctx.token || '')}`;
-  // Hub mode: route chat WS to the edge that owns the session/project
-  if (ctx.machineId) q += `&machine=${encodeURIComponent(ctx.machineId)}`;
+  const q = new URLSearchParams();
+  if (ctx.token) q.set('token', ctx.token);
+  // Hub mode: route chat WS to the selected edge
+  const mid = ctx.machineId || (typeof localStorage !== 'undefined' ? localStorage.getItem('machineId') : null);
+  if (mid) q.set('machine', mid);
   ctx.ws = new WebSocket(`${proto}://${location.host}/ws/chat?${q}`);
-  ctx.ws.addEventListener('open',    () => appendSystemMsg(ctx.machineId ? `Connected · ${ctx.machineId}` : 'Connected'));
+  ctx.ws.addEventListener('open',    () => appendSystemMsg(mid ? `Connected · ${mid}` : 'Connected'));
   ctx.ws.addEventListener('message', e  => handleWsMessage(JSON.parse(e.data)));
   ctx.ws.addEventListener('close',   () => { if (isProcessing.peek()) { appendSystemMsg('Connection closed'); isProcessing.value = false; } });
   ctx.ws.addEventListener('error',   () => { appendSystemMsg('WebSocket error'); isProcessing.value = false; });

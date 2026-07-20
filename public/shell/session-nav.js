@@ -93,47 +93,48 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
     ? `${resolvedCwd || sid}  @${resolvedMachine}`
     : (resolvedCwd || sid);
 
-  if (resolvedCwd && resolvedCwd !== currentProject.peek()?.path) {
+  // Always open project shell + sync roots when we know the cwd
+  if (resolvedCwd) {
+    const prev = currentProject.peek();
+    const pathChanged = !prev || prev.path !== resolvedCwd;
     const name = resolvedCwd.split('/').filter(Boolean).pop() || resolvedCwd;
-    batch(() => {
-      currentProject.value = { id: name, name, path: resolvedCwd, machineId: resolvedMachine };
-      sessionFilter.value = resolvedCwd;
-      filesRoot.value = '';
-      gitRoot.value = '';
-      filesPath.value = '';
-      viewingFile.value = null;
-    });
+    if (pathChanged) {
+      batch(() => {
+        currentProject.value = { id: name, name, path: resolvedCwd, machineId: resolvedMachine };
+        sessionFilter.value = resolvedCwd;
+        filesRoot.value = '';
+        gitRoot.value = '';
+        filesPath.value = '';
+        viewingFile.value = null;
+      });
+    } else if (resolvedMachine && prev && prev.machineId !== resolvedMachine) {
+      currentProject.value = { ...prev, machineId: resolvedMachine };
+    }
     $('topbar-project').textContent = topLabel;
     const fi = $('files-root-input'); if (fi) fi.value = resolvedCwd;
     const gi = $('git-root-input');   if (gi) gi.value = resolvedCwd;
+    $('welcome')?.classList.add('hidden');
     const pv = $('project-view');
-    pv.classList.remove('hidden');
-    pv.style.display = 'flex';
-    $('welcome').classList.add('hidden');
+    if (pv) {
+      pv.classList.remove('hidden');
+      pv.style.display = 'flex';
+      pv.style.flexDirection = 'column';
+      pv.style.flex = '1';
+      pv.style.minHeight = '0';
+      pv.style.overflow = 'hidden';
+    }
     connectWS();
-  } else if (!currentProject.peek() && resolvedCwd) {
-    const name = resolvedCwd.split('/').filter(Boolean).pop() || resolvedCwd;
-    batch(() => {
-      currentProject.value = { id: name, name, path: resolvedCwd, machineId: resolvedMachine };
-      sessionFilter.value = resolvedCwd;
-      filesRoot.value = '';
-      gitRoot.value = '';
-      filesPath.value = '';
-      viewingFile.value = null;
-    });
-    $('topbar-project').textContent = topLabel;
-    const fi = $('files-root-input'); if (fi) fi.value = resolvedCwd;
-    const gi = $('git-root-input');   if (gi) gi.value = resolvedCwd;
-    $('welcome').classList.add('hidden');
-    const pv = $('project-view');
-    pv.classList.remove('hidden');
-    pv.style.display = 'flex';
-    connectWS();
-  } else if (!resolvedCwd) {
+  } else {
     // Still open project shell so files tab can show path input
     $('welcome')?.classList.add('hidden');
     const pv = $('project-view');
-    if (pv) { pv.classList.remove('hidden'); pv.style.display = 'flex'; }
+    if (pv) {
+      pv.classList.remove('hidden');
+      pv.style.display = 'flex';
+      pv.style.flexDirection = 'column';
+      pv.style.flex = '1';
+      pv.style.minHeight = '0';
+    }
   }
 
   // Switch to target tab BEFORE history (files/git/shell usable immediately)

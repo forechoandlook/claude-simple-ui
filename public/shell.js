@@ -175,12 +175,36 @@ export function initShell() {
       btn.classList.toggle('text-base-content/50', !active);
       btn.classList.toggle('border-transparent', !active);
     });
+    // Keep project-view as a column flex container so tab panels can fill height
+    const pv = $('project-view');
+    if (pv && !pv.classList.contains('hidden')) {
+      pv.style.display = 'flex';
+      pv.style.flexDirection = 'column';
+      pv.style.minHeight = '0';
+      pv.style.flex = '1';
+    }
     ['chat', 'files', 'git', 'shell', 'memory'].forEach(id => {
       const el = $(`tab-${id}`);
-      el.classList.toggle('hidden', id !== tab);
-      el.style.display = id === tab ? 'flex' : '';
+      if (!el) return;
+      const on = id === tab;
+      el.classList.toggle('hidden', !on);
+      if (on) {
+        el.style.display = 'flex';
+        el.style.flexDirection = 'column';
+        el.style.flex = '1 1 0';
+        el.style.minHeight = '0';
+        el.style.overflow = 'hidden';
+      } else {
+        el.style.display = 'none';
+      }
     });
     if (tab === 'memory') loadMemoryTab();
+    // Shell needs a re-fit after becoming visible
+    if (tab === 'shell') {
+      requestAnimationFrame(() => {
+        document.dispatchEvent(new CustomEvent('shell-tab-shown'));
+      });
+    }
   });
 
   initSidebarResize();
