@@ -1,6 +1,6 @@
 // app.js — Entry point
 import { ctx } from './state.js';
-import { api } from './api.js';
+import { probeHub } from './api.js';
 import { initShell, showApp, initAuth, resumeSession, switchTab } from './shell.js';
 import { initChat } from './chat.js';
 import { initFilesTab } from './files.js';
@@ -22,8 +22,9 @@ initTerminal();
 initImagePaste();
 initRouter(resumeSession, switchTab);
 
-// 3. Boot: resume session if token exists, otherwise show auth
+// 3. Boot: probe hub mode, then resume session or show auth
 (async () => {
+  await probeHub();
   if (ctx.token) {
     try {
       await showApp();           // loads sessions into state

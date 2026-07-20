@@ -193,10 +193,28 @@ async function bootstrapEnvUser() {
 }
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
+// When this process is an edge worker (client.js), the hub authenticates users
+// and forwards with X-Hub-Token: MACHINE_TOKEN. JWT still works for standalone UI.
 function authMiddleware(req, res, next) {
+  const hubSecret = process.env.MACHINE_TOKEN;
+  const hubHeader = req.headers['x-hub-token'];
+  if (hubSecret && hubHeader && hubHeader === hubSecret) {
+    req.user = {
+      userId: 0,
+      username: req.headers['x-hub-user'] || 'hub',
+      viaHub: true,
+    };
+    return next();
+  }
+
   const header = req.headers['authorization'];
   let token = header && header.split(' ')[1];
   if (!token && req.query.token) token = req.query.token;
+  // Hub also tunnels WS with ?token=MACHINE_TOKEN&hub=1
+  if (hubSecret && token && token === hubSecret) {
+    req.user = { userId: 0, username: 'hub', viaHub: true };
+    return next();
+  }
   if (!token) return res.status(401).json({ error: 'No token' });
   const decoded = verifyToken(token);
   if (!decoded) return res.status(403).json({ error: 'Invalid token' });
@@ -831,7 +849,13 @@ export function createApp() {
   wssChat.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://localhost`);
     const token = url.searchParams.get('token');
-    const decoded = verifyToken(token);
+    const hubSecret = process.env.MACHINE_TOKEN;
+    let decoded = null;
+    if (hubSecret && token === hubSecret) {
+      decoded = { userId: 0, username: 'hub', viaHub: true };
+    } else {
+      decoded = verifyToken(token);
+    }
     if (!decoded) {
       ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
       ws.close(1008, 'Unauthorized');
@@ -879,7 +903,13 @@ export function createApp() {
   wssShell.on('connection', (ws, req) => {
     const url     = new URL(req.url, 'http://localhost');
     const token   = url.searchParams.get('token');
-    const decoded = verifyToken(token);
+    const hubSecret = process.env.MACHINE_TOKEN;
+    let decoded = null;
+    if (hubSecret && token === hubSecret) {
+      decoded = { userId: 0, username: 'hub', viaHub: true };
+    } else {
+      decoded = verifyToken(token);
+    }
     if (!decoded) { ws.close(1008, 'Unauthorized'); return; }
 
     const cwd  = url.searchParams.get('cwd') || os.homedir();

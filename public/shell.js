@@ -6,8 +6,9 @@ import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort
          sidebarView, agentFilter, timeRange, activityHits, activityLoading,
          chatDensity, setChatDensity,
          sessionMetaMap, favoritesOnly, LOW_TURN_THRESHOLD, metaKey, getSessionMeta,
+         hubMode, machinesList,
          AGENT_LABELS, AGENT_MODELS, AGENT_DEFAULT_MODEL, ctx } from './state.js';
-import { api } from './api.js';
+import { api, probeHub } from './api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
 import { connectWS, clearMessages, appendMsg, appendSystemMsg, renderToolUse,
          appendHistoryTokenBar, appendContextBar, sendMessage, stopProcessing, attachImage,
@@ -276,6 +277,10 @@ const AppShell = () => `
             <option value="codex">OpenAI Codex</option>
             <option value="grok">Grok</option>
           </select>
+        </label>
+        <label class="form-control" id="new-session-machine-wrap" style="display:none">
+          <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Machine (edge server)</span></div>
+          <select id="new-session-machine" class="select select-bordered select-sm"></select>
         </label>
         <label class="form-control">
           <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Working Directory</span></div>
@@ -585,7 +590,7 @@ function sessionItemHtml(s, { showProject = false } = {}) {
   const title  = s.snippet && sessionSearch.peek()
     ? s.snippet
     : (s.display || s.sessionId.slice(0, 8));
-  const meta = sessionMetaMap.peek()?.[metaKey(s.agent, s.sessionId)] || {};
+  const meta = sessionMetaMap.peek()?.[metaKey(s.agent, s.sessionId, s.machineId)] || {};
   const fav = !!meta.favorite;
   const hasNote = !!(meta.notes && String(meta.notes).trim());
   const turns = Number(s.turnCount) || 0;
@@ -597,24 +602,29 @@ function sessionItemHtml(s, { showProject = false } = {}) {
     thin ? `<span class="session-thin-badge" title="Only ${turns} turn${turns === 1 ? '' : 's'}">thin·${turns}</span>` : '',
     hasNote ? `<span class="session-note-dot" title="${esc(meta.notes)}">📝</span>` : '',
   ].filter(Boolean).join('');
+  const machineBadge = s.machineId
+    ? `<span class="text-[9px] px-1 py-0.5 rounded bg-base-300 text-base-content/50 font-mono flex-shrink-0" title="Machine">${esc(s.machineId)}</span>`
+    : '';
   return `<div class="session-row px-2.5 py-1.5 cursor-pointer hover:bg-base-300 border-l-2
               ${active ? 'border-primary bg-primary/5' : 'border-transparent'} ${fav ? 'session-fav' : ''} ${thin ? 'session-thin' : ''}"
        data-session-id="${esc(s.sessionId)}"
        data-session-cwd="${esc(s.cwd || '')}"
        data-session-config-dir="${esc(s.configDir || '')}"
-       data-session-agent="${esc(s.agent || 'claude')}">
+       data-session-agent="${esc(s.agent || 'claude')}"
+       data-session-machine="${esc(s.machineId || '')}">
     <div class="flex items-start gap-1.5">
       <button type="button" class="session-fav-btn flex-shrink-0 leading-none mt-0.5 ${fav ? 'is-fav' : ''}"
               data-fav-toggle="1"
               data-fav-session-id="${esc(s.sessionId)}"
               data-fav-session-agent="${esc(s.agent || 'claude')}"
+              data-fav-session-machine="${esc(s.machineId || '')}"
               title="${fav ? 'Unfavorite' : 'Favorite'}">${fav ? '★' : '☆'}</button>
       ${agentBadge(s.agent)}
       <div class="min-w-0 flex-1">
         <div class="text-[11px] leading-snug truncate ${active ? 'text-primary font-medium' : 'text-base-content/85'}"
              title="${esc(s.display || '')}">${esc(title)}</div>
         ${projectLine}
-        ${badges ? `<div class="flex items-center gap-1 mt-0.5">${badges}</div>` : ''}
+        ${badges || machineBadge ? `<div class="flex items-center gap-1 mt-0.5 flex-wrap">${machineBadge}${badges}</div>` : ''}
       </div>
       <span class="text-[9px] text-base-content/30 flex-shrink-0 mt-0.5">${formatTime(s.updatedAt)}</span>
     </div>
@@ -667,12 +677,16 @@ function renderProjectGroups(groups) {
       open = forceOpen || key === topCwd || groups.length <= 3;
     }
     const latestTitle = g.latest?.display || g.latest?.snippet || '';
+    const machineTag = g.machineId
+      ? `<span class="text-[9px] font-mono text-base-content/40 flex-shrink-0">@${esc(g.machineId)}</span>`
+      : '';
     const header = `
       <div class="project-header px-2.5 py-2 cursor-pointer hover:bg-base-300/80 select-none border-b border-base-300/40"
-           data-folder="${esc(key)}" data-project-cwd="${esc(g.cwd || '')}">
+           data-folder="${esc(key)}" data-project-cwd="${esc(g.cwd || '')}" data-project-machine="${esc(g.machineId || '')}">
         <div class="flex items-center gap-1.5">
           <span class="text-[10px] text-base-content/40 w-3 flex-shrink-0">${open ? '▾' : '▸'}</span>
           <span class="text-[12px] font-semibold truncate flex-1" title="${esc(g.cwd || '')}">${esc(g.projectName)}</span>
+          ${machineTag}
           <span class="text-[9px] text-base-content/30 flex-shrink-0">${formatTime(g.updatedAt)}</span>
         </div>
         <div class="flex items-center gap-1.5 mt-0.5 pl-4">
@@ -881,27 +895,45 @@ export function goHome() {
   setHash('/');
 }
 
-export async function resumeSession(sid, cwd, configDir, agent) {
-  const resolvedAgent = agent
-    || sessionsData.peek().find(s => s.sessionId === sid)?.agent
-    || 'claude';
+export async function resumeSession(sid, cwd, configDir, agent, machineId) {
+  const fromList = sessionsData.peek().find(s =>
+    s.sessionId === sid && (!machineId || s.machineId === machineId || !s.machineId)
+  );
+  const resolvedAgent = agent || fromList?.agent || 'claude';
+  const resolvedMachine = machineId || fromList?.machineId || null;
+
+  // Switch edge machine (hub): reconnect WS so chat runs on the right host
+  if (resolvedMachine && resolvedMachine !== ctx.machineId) {
+    ctx.machineId = resolvedMachine;
+    localStorage.setItem('machineId', resolvedMachine);
+    try { ctx.ws?.close(); } catch {}
+    ctx.ws = null;
+  } else if (!resolvedMachine && ctx.machineId && !hubMode.peek()) {
+    // keep
+  } else if (resolvedMachine) {
+    ctx.machineId = resolvedMachine;
+    localStorage.setItem('machineId', resolvedMachine);
+  }
+
   ctx.sessionId = sid;
   ctx.configDir = configDir || null;
   ctx.agent = resolvedAgent;
   setAgent(resolvedAgent);
   refreshModelSelect();
 
+  const topLabel = resolvedMachine ? `${cwd || sid}  @${resolvedMachine}` : (cwd || sid);
+
   if (cwd && cwd !== currentProject.peek()?.path) {
     const name = cwd.split('/').filter(Boolean).pop() || cwd;
     batch(() => {
-      currentProject.value = { id: name, name, path: cwd };
+      currentProject.value = { id: name, name, path: cwd, machineId: resolvedMachine };
       sessionFilter.value = cwd;
       filesRoot.value = '';
       gitRoot.value = '';
       filesPath.value = '';
       viewingFile.value = null;
     });
-    $('topbar-project').textContent = cwd;
+    $('topbar-project').textContent = topLabel;
     // Pre-fill root inputs with session cwd so user can see/edit the path
     const fi = $('files-root-input'); if (fi) fi.value = cwd;
     const gi = $('git-root-input');   if (gi) gi.value = cwd;
@@ -909,25 +941,25 @@ export async function resumeSession(sid, cwd, configDir, agent) {
     pv.classList.remove('hidden');
     pv.style.display = 'flex';
     $('welcome').classList.add('hidden');
-    if (!ctx.ws || ctx.ws.readyState !== WebSocket.OPEN) connectWS();
+    connectWS();
   } else if (!currentProject.peek() && cwd) {
     const name = cwd.split('/').filter(Boolean).pop() || cwd;
     batch(() => {
-      currentProject.value = { id: name, name, path: cwd };
+      currentProject.value = { id: name, name, path: cwd, machineId: resolvedMachine };
       sessionFilter.value = cwd;
       filesRoot.value = '';
       gitRoot.value = '';
       filesPath.value = '';
       viewingFile.value = null;
     });
-    $('topbar-project').textContent = cwd;
+    $('topbar-project').textContent = topLabel;
     const fi = $('files-root-input'); if (fi) fi.value = cwd;
     const gi = $('git-root-input');   if (gi) gi.value = cwd;
     $('welcome').classList.add('hidden');
     const pv = $('project-view');
     pv.classList.remove('hidden');
     pv.style.display = 'flex';
-    if (!ctx.ws || ctx.ws.readyState !== WebSocket.OPEN) connectWS();
+    connectWS();
   }
   clearMessages();
   switchTab('chat');
@@ -1167,7 +1199,21 @@ export async function showApp() {
     }
   }
 
+  // Detect unified hub (public WebUI + many edges)
+  const hub = await probeHub();
+  if (hub) {
+    machinesList.value = hub.machines || [];
+    const subtitle = $('auth-subtitle');
+    // leave auth as-is; topbar hint after login
+  }
   await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
+  if (hubMode.peek()) {
+    const n = machinesList.peek()?.length || 0;
+    const bar = $('topbar-project');
+    if (bar && bar.textContent === 'Select a session') {
+      bar.textContent = n ? `Hub · ${n} machine(s)` : 'Hub · no machines online';
+    }
+  }
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -1260,6 +1306,20 @@ function openNewSessionModal() {
     // pre-select current session's workspace
     if (ctx.configDir) sel.value = ctx.configDir;
   }
+  const mwrap = $('new-session-machine-wrap');
+  const msel = $('new-session-machine');
+  if (mwrap && msel) {
+    if (hubMode.peek()) {
+      mwrap.style.display = '';
+      const ms = machinesList.peek() || [];
+      msel.innerHTML = ms.length
+        ? ms.map(m => `<option value="${esc(m.id)}">${esc(m.id)}${m.hostname ? ' — ' + esc(m.hostname) : ''}</option>`).join('')
+        : '<option value="">(no machines online)</option>';
+      if (ctx.machineId) msel.value = ctx.machineId;
+    } else {
+      mwrap.style.display = 'none';
+    }
+  }
   updateNewSessionAgentUI();
   $('new-session-path').value = currentProject.peek()?.path || '';
   $('new-session-error').classList.add('hidden');
@@ -1281,6 +1341,18 @@ async function startNewSession() {
   errEl.classList.add('hidden');
 
   if (!rawPath) { errEl.textContent = 'Working directory is required'; errEl.classList.remove('hidden'); return; }
+
+  // Hub: new session must target an online edge machine
+  if (hubMode.peek()) {
+    const mid = $('new-session-machine')?.value || ctx.machineId || machinesList.peek()?.[0]?.id;
+    if (!mid) {
+      errEl.textContent = 'No edge machine online — start client.js on a host first';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    ctx.machineId = mid;
+    localStorage.setItem('machineId', mid);
+  }
 
   try {
     const result = await api('POST', '/api/resolve-path', { path: rawPath });
@@ -1509,6 +1581,7 @@ export function initShell() {
       el.dataset.sessionCwd || null,
       el.dataset.sessionConfigDir || null,
       el.dataset.sessionAgent || 'claude',
+      el.dataset.sessionMachine || null,
     );
     closeSidebarOnMobile();
   });
@@ -1672,6 +1745,8 @@ export function initShell() {
   delegate.on('click', '[data-fav-toggle]', (e, el) => {
     e.stopPropagation();
     e.preventDefault();
+    const mid = el.dataset.favSessionMachine || ctx.machineId;
+    if (mid) { ctx.machineId = mid; localStorage.setItem('machineId', mid); }
     toggleSessionFavorite(el.dataset.favSessionId, el.dataset.favSessionAgent || 'claude');
   });
   delegate.on('click', '#btn-edit-session-notes, #session-notes-text', () => {

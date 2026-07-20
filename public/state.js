@@ -34,12 +34,17 @@ export const favoritesOnly  = signal(localStorage.getItem('favoritesOnly') === '
 /** Sessions with this many user turns or fewer get a “thin” badge */
 export const LOW_TURN_THRESHOLD = 2;
 
-export function metaKey(agent, sessionId) {
-  return `${agent || 'claude'}:${sessionId}`;
+export function metaKey(agent, sessionId, machineId) {
+  const base = `${agent || 'claude'}:${sessionId}`;
+  // Hub aggregates as machineId:agent:sessionId
+  if (machineId || ctx?.machineId) {
+    return `${machineId || ctx.machineId}:${base}`;
+  }
+  return base;
 }
 
-export function getSessionMeta(agent, sessionId) {
-  const m = sessionMetaMap.peek()?.[metaKey(agent, sessionId)];
+export function getSessionMeta(agent, sessionId, machineId) {
+  const m = sessionMetaMap.peek()?.[metaKey(agent, sessionId, machineId)];
   return m || { favorite: false, notes: '' };
 }
 
@@ -113,9 +118,9 @@ function matchesTimeRange(s, daysStr) {
 
 function matchesSearch(s, search) {
   if (!search) return true;
-  const meta = sessionMetaMap.value?.[metaKey(s.agent, s.sessionId)];
+  const meta = sessionMetaMap.value?.[metaKey(s.agent, s.sessionId, s.machineId)];
   const hay = [
-    s.display, s.cwd, s.projectName, s.agent, s.sessionId, s.snippet,
+    s.display, s.cwd, s.projectName, s.agent, s.sessionId, s.snippet, s.machineId,
     meta?.notes,
   ].filter(Boolean).join(' ').toLowerCase();
   return hay.includes(search);
@@ -139,7 +144,7 @@ export const filteredSessions = computed(() => {
   if (filter) list = list.filter(s => s.cwd === filter || s.configDir === filter);
   list = list.filter(s => matchesAgentFilter(s, aFilter) && matchesTimeRange(s, days));
   if (favOnly) {
-    list = list.filter(s => metaMap?.[metaKey(s.agent, s.sessionId)]?.favorite);
+    list = list.filter(s => metaMap?.[metaKey(s.agent, s.sessionId, s.machineId)]?.favorite);
   }
   if (search && !(hits?.results && hits.q === search)) {
     list = list.filter(s => matchesSearch(s, search));
@@ -147,8 +152,8 @@ export const filteredSessions = computed(() => {
 
   list = [...list].sort((a, b) => {
     // Favorites float to top within the same sort key
-    const fa = metaMap?.[metaKey(a.agent, a.sessionId)]?.favorite ? 1 : 0;
-    const fb = metaMap?.[metaKey(b.agent, b.sessionId)]?.favorite ? 1 : 0;
+    const fa = metaMap?.[metaKey(a.agent, a.sessionId, a.machineId)]?.favorite ? 1 : 0;
+    const fb = metaMap?.[metaKey(b.agent, b.sessionId, b.machineId)]?.favorite ? 1 : 0;
     if (fa !== fb) return fb - fa;
     return sort === 'project'
       ? (a.cwd || '').localeCompare(b.cwd || '') || (b.updatedAt - a.updatedAt)
@@ -165,10 +170,12 @@ export const projectGroups = computed(() => {
   const list = filteredSessions.value;
   const map = new Map();
   for (const s of list) {
-    const key = s.cwd || '(no path)';
+    // Hub: same cwd on different machines are different projects
+    const key = s.machineId ? `${s.machineId}::${s.cwd || '(no path)'}` : (s.cwd || '(no path)');
     if (!map.has(key)) {
       map.set(key, {
         cwd: s.cwd || null,
+        machineId: s.machineId || null,
         projectName: s.projectName || (s.cwd ? s.cwd.split('/').filter(Boolean).pop() : '(no path)'),
         updatedAt: 0,
         agents: {},
@@ -192,7 +199,12 @@ export const ctx = {
   token:       localStorage.getItem('token'),
   sessionId:   null,
   agent:       null,
+  machineId:   localStorage.getItem('machineId') || null, // hub mode: which edge server
   ws:          null,
   shellBubble: null,
   configDir:   null,
 };
+
+/** Hub mode: single WebUI, many edge machines (set after /api/hub probe). */
+export const hubMode = signal(false);
+export const machinesList = signal([]);

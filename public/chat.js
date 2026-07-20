@@ -24,8 +24,11 @@ function stickBottom(el, force) {
 export function connectWS() {
   ctx.ws?.close();
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ctx.ws = new WebSocket(`${proto}://${location.host}/ws/chat?token=${ctx.token}`);
-  ctx.ws.addEventListener('open',    () => appendSystemMsg('Connected'));
+  let q = `token=${encodeURIComponent(ctx.token || '')}`;
+  // Hub mode: route chat WS to the edge that owns the session/project
+  if (ctx.machineId) q += `&machine=${encodeURIComponent(ctx.machineId)}`;
+  ctx.ws = new WebSocket(`${proto}://${location.host}/ws/chat?${q}`);
+  ctx.ws.addEventListener('open',    () => appendSystemMsg(ctx.machineId ? `Connected · ${ctx.machineId}` : 'Connected'));
   ctx.ws.addEventListener('message', e  => handleWsMessage(JSON.parse(e.data)));
   ctx.ws.addEventListener('close',   () => { if (isProcessing.peek()) { appendSystemMsg('Connection closed'); isProcessing.value = false; } });
   ctx.ws.addEventListener('error',   () => { appendSystemMsg('WebSocket error'); isProcessing.value = false; });

@@ -1,71 +1,82 @@
-# Claude Simple Gateway (Go)
+# Claude Simple — Hub (Go binary)
 
-Public multi-machine relay as a **single static binary**.  
-Worker machines still run Node `client.js` (local UI + Claude/Codex/Grok CLIs).
+**One public WebUI** + **many edge servers** (machines A/B/C…).
 
 ```
-Browser ──HTTP/WS──►  claude-gateway (Go)  ──control WS──►  client.js @ machine A
-                                         └──control WS──►  client.js @ machine B
+                    ┌─────────────────────────┐
+   Browser ────────►│  claude-gateway (Go)    │  public VPS
+                    │  · WebUI (static)       │
+                    │  · login                │
+                    │  · merge sessions       │
+                    │  · route by machineId   │
+                    └───────────┬─────────────┘
+                    ┌───────────┼─────────────┐
+                    ▼           ▼             ▼
+              client.js    client.js     client.js
+              (edge A)     (edge B)      (edge C)
+              Node+CLI     Node+CLI      Node+CLI
 ```
+
+- **Hub** = this Go binary: only needs the binary + `public/` UI assets. No Node on the VPS.
+- **Edge** = `npm run client` on each machine that has Claude/Codex/Grok sessions.
+- **Standalone** = `npm run dev` / `node server.js` on one machine (UI + agents together; no hub).
 
 ## Build
 
 ```bash
 cd gateway
-make build                 # ./dist/claude-gateway
-make linux-amd64           # deploy to x86_64 Linux
-make release               # all common targets
+make build                 # dist/claude-gateway
+make linux-amd64           # for typical VPS
 ```
 
-Requires Go 1.22+.
-
-## Run
+## Run hub (public)
 
 ```bash
-export MACHINE_TOKEN='long-random-secret'
-# optional: GATEWAY_PORT=8080  or  GATEWAY_ADDR=0.0.0.0:8080
+export MACHINE_TOKEN='long-shared-secret'   # edges use the same value
+export HUB_USERNAME=admin                   # optional (default admin)
+export HUB_PASSWORD='your-login-password'   # optional (default = MACHINE_TOKEN)
+export PUBLIC_DIR=/path/to/claude-simple/public
+export GATEWAY_ADDR=0.0.0.0:8080
+
 ./dist/claude-gateway
 ```
 
-Health: `GET /healthz`  
-Picker: `GET /`  
-Machines: `GET /api/machines`  
-App proxy: `/machine/<id>/…`  
-Machine control WS: `/machine-connect` (header `X-Machine-Token`)
+Open `https://your-host/` → log in with hub credentials → session list merges **all** edges.
 
-## Worker machines (Node)
-
-On each host that has sessions / CLIs:
+## Run edge (each machine)
 
 ```bash
-export MACHINE_TOKEN='same-secret'
-export MACHINE_ID='laptop-a'          # unique
-export GATEWAY_URL='wss://ui.example.com/machine-connect'
-export LOCAL_PORT=13000               # local app bind
-npm run client                        # from repo root
+export MACHINE_TOKEN='long-shared-secret'   # same as hub
+export MACHINE_ID='laptop-a'                # unique id
+export GATEWAY_URL='wss://your-host/machine-connect'
+export LOCAL_PORT=13000
+
+# from repo root
+npm run client
 ```
 
-## systemd example
+Edge:
 
-```ini
-[Unit]
-Description=Claude Simple Gateway
-After=network.target
+- Binds app to `127.0.0.1` only
+- Registers to hub over control WebSocket
+- Trusts hub via `X-Hub-Token: MACHINE_TOKEN` (browser never sees this secret)
 
-[Service]
-ExecStart=/opt/claude-gateway/claude-gateway
-Environment=MACHINE_TOKEN=change-me
-Environment=GATEWAY_ADDR=0.0.0.0:8080
-Restart=on-failure
-User=www-data
+Optional: run full UI on the edge alone with `node server.js` (no `GATEWAY_URL`).
 
-[Install]
-WantedBy=multi-user.target
-```
+## How routing works
 
-Put TLS (Caddy / nginx) in front for production HTTPS/WSS.
+| Browser call | Hub behavior |
+|--------------|--------------|
+| `GET /api/sessions` | Fan-out to every edge; each session gets `machineId` |
+| `GET /api/…` (messages, files, …) | Needs `X-Machine-Id` → proxy that edge |
+| `WS /ws/chat?machine=id&token=hubJwt` | Tunnel to edge `/ws/chat` with hub secret |
 
-## Protocol
+UI stores `ctx.machineId` when you open a session (or pick a machine for New Session).
 
-Compatible with the original Node `gateway.js` / `client.js` control channel
-(`register`, `http-req`/`http-res`, `ws-open`/`ws-msg`/`ws-close`, `ping`/`pong`).
+## TLS
+
+Put Caddy/nginx in front for HTTPS/WSS. Hub itself is plain HTTP.
+
+## Health
+
+`GET /healthz` → `ok`

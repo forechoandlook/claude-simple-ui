@@ -89,7 +89,9 @@ function connect(cwd) {
   const cwdParam = cwd ? `&cwd=${encodeURIComponent(cwd)}` : '';
   const cols = term ? term.cols : 80;
   const rows = term ? term.rows : 24;
-  ws = new WebSocket(`${proto}://${location.host}/ws/shell?token=${ctx.token}${cwdParam}&cols=${cols}&rows=${rows}`);
+  let q = `token=${encodeURIComponent(ctx.token || '')}${cwdParam}&cols=${cols}&rows=${rows}`;
+  if (ctx.machineId) q += `&machine=${encodeURIComponent(ctx.machineId)}`;
+  ws = new WebSocket(`${proto}://${location.host}/ws/shell?${q}`);
 
   ws.addEventListener('open', () => {
     connected = true;

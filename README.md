@@ -98,55 +98,55 @@ npm install -g @openai/codex
 - Auto-fit responsive terminal resizing (syncs terminal window dimensions dynamically between frontend and backend via PTY ioctls)
 - Easy one-click reconnect and output clear
 
-## Multi-machine (Go gateway binary)
+## Multi-machine: one WebUI, many servers
 
-Sessions live on the machines that run Claude/Codex/Grok CLIs. The **public edge is a Go binary** (easy deploy: copy one file, no Node on the VPS). Each worker still runs Node `client.js` locally (needs CLIs + SDK).
+**Goal:** users open a **single public UI**; sessions from machine A, B, C appear in one list; chat/files route to the machine that owns that session.
 
 ```
-Browser  ──HTTP/WS──►  claude-gateway (Go)  ──relay──►  client.js@A  (local UI + ~/.claude …)
-                                       └──relay──►  client.js@B
+Browser ──► Hub (Go binary + public/) ──► edge client.js @ A
+                                    ├──► edge client.js @ B
+                                    └──► edge client.js @ C
 ```
 
-| Role | Process | Binds | Env |
-|------|---------|-------|-----|
-| **Gateway (Go)** | `gateway/dist/claude-gateway` | public port (default `:8080`) | `MACHINE_TOKEN`, optional `GATEWAY_PORT` / `GATEWAY_ADDR` |
-| Machine (Node) | `npm run client` | `127.0.0.1:LOCAL_PORT` (default 13000) | `GATEWAY_URL`, `MACHINE_TOKEN`, `MACHINE_ID` |
+| Role | What it is | Install |
+|------|------------|---------|
+| **Hub (中心端)** | Public WebUI + login + session merge + routing | Go binary `claude-gateway` + copy of `public/` |
+| **Edge (服务端)** | Agent runtime on each host (CLIs, sessions, files) | Node `npm run client` |
+| **Standalone** | UI + agents on one machine (dev / single host) | `node server.js` — no hub |
 
-### Build & run gateway
+### Hub (public VPS)
 
 ```bash
-cd gateway
-make build                    # → dist/claude-gateway (~6MB, CGO_ENABLED=0)
-make linux-amd64              # cross-compile for VPS
+cd gateway && make linux-amd64
+# copy dist/claude-gateway-linux-amd64 + repo public/ to VPS
 
-# On public host
-MACHINE_TOKEN=long-secret ./dist/claude-gateway
-# or: GATEWAY_ADDR=0.0.0.0:8080 MACHINE_TOKEN=… ./dist/claude-gateway
+MACHINE_TOKEN=shared-secret \
+HUB_USERNAME=admin HUB_PASSWORD=login-pass \
+PUBLIC_DIR=/opt/claude-simple/public \
+GATEWAY_ADDR=0.0.0.0:8080 \
+./claude-gateway
 ```
 
-See [gateway/README.md](gateway/README.md) for systemd and cross-compile targets.
+Login in the browser with `HUB_USERNAME` / `HUB_PASSWORD`.
 
-Legacy Node gateway (same protocol): `npm run gateway` → `gateway.js`.
-
-### Worker machines
+### Edge (each machine with sessions)
 
 ```bash
-# laptop A
-MACHINE_TOKEN=long-secret MACHINE_ID=laptop-a \
-  GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
-
-# server B
-MACHINE_TOKEN=long-secret MACHINE_ID=build-b \
-  GATEWAY_URL=wss://ui.example.com/machine-connect npm run client
+MACHINE_TOKEN=shared-secret \
+MACHINE_ID=laptop-a \
+GATEWAY_URL=wss://ui.example.com/machine-connect \
+npm run client
 ```
 
-Open the gateway root → **Choose a machine** → UI at `/machine/<id>/` (HTTP API + chat/shell WebSockets).
+Edges only listen on `127.0.0.1`. Optional: run `node server.js` on an edge if you also want a **local** WebUI on that host.
 
-Notes:
+### UX
 
-- Auth, project notes, and session meta are **per machine**.
-- CLI tools and session history must exist on that machine.
-- Put TLS in front of the Go gateway (Caddy/nginx) for production WSS.
+- Session list is **merged**; each row may show `@machineId`
+- Opening a session sets routing → chat/files/git hit that edge
+- New Session (hub mode) asks which machine to use
+
+Details: [gateway/README.md](gateway/README.md).
 
 ## Stack
 

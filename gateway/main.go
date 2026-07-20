@@ -19,6 +19,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -497,7 +498,9 @@ func (g *gateway) handleMachineConnect(w http.ResponseWriter, r *http.Request) {
 
 // ── WebSocket: browser tunnel ─────────────────────────────────────────────────
 
-func (g *gateway) handleBrowserTunnel(w http.ResponseWriter, r *http.Request, machineID, wsPath string) {
+// openBrowserTunnel upgrades the browser connection and relays through a machine.
+// edgeQuery is the query string sent to the edge (must include edge auth).
+func (g *gateway) openBrowserTunnel(w http.ResponseWriter, r *http.Request, machineID, wsPath, edgeQuery string) {
 	if g.getMachine(machineID) == nil {
 		http.Error(w, "Machine not connected", http.StatusServiceUnavailable)
 		return
@@ -511,12 +514,11 @@ func (g *gateway) handleBrowserTunnel(w http.ResponseWriter, r *http.Request, ma
 	defer browser.Close()
 
 	tunnelID := newID()
-	query := r.URL.RawQuery
-	if query != "" {
-		query = "?" + query
+	if edgeQuery != "" && !strings.HasPrefix(edgeQuery, "?") {
+		edgeQuery = "?" + edgeQuery
 	}
 
-	if err := g.openTunnel(machineID, tunnelID, wsPath, query); err != nil {
+	if err := g.openTunnel(machineID, tunnelID, wsPath, edgeQuery); err != nil {
 		log.Printf("[gateway] Tunnel open failed: %v", err)
 		_ = browser.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Tunnel failed"))
@@ -554,47 +556,123 @@ func (g *gateway) handleBrowserTunnel(w http.ResponseWriter, r *http.Request, ma
 	}
 }
 
+// Unified UI paths: /ws/chat?token=hubJwt&machine=id  → edge /ws/chat?token=MACHINE_TOKEN
+func (g *gateway) handleHubBrowserWS(w http.ResponseWriter, r *http.Request) {
+	tok := r.URL.Query().Get("token")
+	if tok == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if _, err := g.verifyHubToken(tok); err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	machineID := r.URL.Query().Get("machine")
+	if machineID == "" {
+		http.Error(w, "machine query required", http.StatusBadRequest)
+		return
+	}
+	// Edge accepts MACHINE_TOKEN as hub-forwarded auth
+	edgeQuery := "token=" + url.QueryEscape(g.token) + "&hub=1"
+	g.openBrowserTunnel(w, r, machineID, r.URL.Path, edgeQuery)
+}
+
+// Legacy: /machine/:id/ws/...
+func (g *gateway) handleLegacyBrowserWS(w http.ResponseWriter, r *http.Request, machineID, wsPath string) {
+	edgeQuery := "token=" + url.QueryEscape(g.token) + "&hub=1"
+	// If browser already sent a hub token, still use machine token toward edge
+	g.openBrowserTunnel(w, r, machineID, wsPath, edgeQuery)
+}
+
 // ── router ────────────────────────────────────────────────────────────────────
 
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// CORS-ish: hub is same-origin for UI; machines connect separately
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Machine-Id")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// WebSocket upgrades
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		if r.URL.Path == "/machine-connect" {
 			g.handleMachineConnect(w, r)
 			return
 		}
+		// Unified UI websockets
+		if r.URL.Path == "/ws/chat" || r.URL.Path == "/ws/shell" {
+			g.handleHubBrowserWS(w, r)
+			return
+		}
 		if m := wsPathRe.FindStringSubmatch(r.URL.Path); m != nil {
-			g.handleBrowserTunnel(w, r, m[1], m[2])
+			g.handleLegacyBrowserWS(w, r, m[1], m[2])
 			return
 		}
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
+	path := r.URL.Path
+
 	switch {
-	case r.URL.Path == "/api/machines":
-		g.handleMachinesAPI(w, r)
-	case r.URL.Path == "/" || r.URL.Path == "":
-		g.handleIndex(w, r)
-	case strings.HasPrefix(r.URL.Path, "/machine/"):
-		// Do not proxy /machine/:id/ws/* as HTTP (handled above for WS)
-		if wsPathRe.MatchString(r.URL.Path) {
+	case path == "/healthz":
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+		return
+	case path == "/api/hub":
+		g.handleHubInfo(w, r)
+		return
+	case path == "/api/machines":
+		// public list (ids only useful when logged in UI still needs it before login for empty state)
+		if r.Method == http.MethodGet {
+			writeJSON(w, g.listMachines())
+			return
+		}
+	case path == "/api/auth/status":
+		g.handleAuthStatus(w, r)
+		return
+	case path == "/api/auth/login":
+		g.handleAuthLogin(w, r)
+		return
+	case path == "/api/auth/register":
+		g.handleAuthRegister(w, r)
+		return
+	case path == "/api/sessions" && r.Method == http.MethodGet:
+		g.handleAggregateSessions(w, r)
+		return
+	case path == "/api/projects" && r.Method == http.MethodGet:
+		g.handleAggregateProjects(w, r)
+		return
+	case path == "/api/activity" && r.Method == http.MethodGet:
+		g.handleAggregateActivity(w, r)
+		return
+	case path == "/api/sessions/meta":
+		g.handleSessionMetaPut(w, r)
+		return
+	case strings.HasPrefix(path, "/api/"):
+		g.handleProxiedAPI(w, r)
+		return
+	case strings.HasPrefix(path, "/machine/"):
+		if wsPathRe.MatchString(path) {
 			http.Error(w, "websocket endpoint", http.StatusUpgradeRequired)
 			return
 		}
+		// Legacy direct machine HTTP proxy (optional deep link)
 		g.handleMachineHTTP(w, r)
-	case r.URL.Path == "/healthz":
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		return
 	default:
-		http.NotFound(w, r)
+		// Static WebUI (unified)
+		g.handleStatic(w, r)
 	}
 }
 
 func main() {
 	token := os.Getenv("MACHINE_TOKEN")
 	if token == "" {
-		log.Fatal("MACHINE_TOKEN is required")
+		log.Fatal("MACHINE_TOKEN is required (shared secret with edge machines)")
 	}
 	addr := os.Getenv("GATEWAY_ADDR")
 	if addr == "" {
@@ -606,18 +684,24 @@ func main() {
 	}
 
 	g := newGateway(token)
+	pub := g.publicDir()
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           g,
 		ReadHeaderTimeout: 15 * time.Second,
-		// large body for office/pdf previews through proxy
-		ReadTimeout:  2 * time.Minute,
-		WriteTimeout: 2 * time.Minute,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      2 * time.Minute,
 	}
 
-	log.Printf("Gateway %s listening on %s", version, addr)
-	log.Printf("Machines connect: ws://<host>%s/machine-connect", addr)
-	log.Printf("Health: http://<host>%s/healthz", addr)
+	log.Printf("Hub %s listening on %s", version, addr)
+	if pub != "" {
+		log.Printf("WebUI: %s", pub)
+	} else {
+		log.Printf("WebUI: not found — set PUBLIC_DIR to public/ (machine picker only)")
+	}
+	log.Printf("Edges register:  ws://<host>/machine-connect  (header X-Machine-Token)")
+	log.Printf("Hub login:       HUB_USERNAME / HUB_PASSWORD (default admin / MACHINE_TOKEN)")
+	log.Printf("Health:          http://<host>/healthz")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
