@@ -1,12 +1,16 @@
 // shell.js — HTML templates, layout bootstrap, sidebar, tabs, auth, modals
 import { watch, effect, batch, computed, delegate, esc, $ } from './lib.js';
 import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort,
-         expandedFolders, filteredSessions, currentProject, currentTab, filesRoot, gitRoot,
-         currentModel, currentEffort, currentPermission, ctx } from './state.js';
+         expandedFolders, filteredSessions, projectGroups, currentProject, currentTab, filesRoot, gitRoot,
+         currentModel, currentEffort, currentPermission, currentAgent, setAgent,
+         sidebarView, agentFilter, timeRange, activityHits, activityLoading,
+         chatDensity, setChatDensity,
+         AGENT_LABELS, AGENT_MODELS, AGENT_DEFAULT_MODEL, ctx } from './state.js';
 import { api } from './api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
 import { connectWS, clearMessages, appendMsg, appendSystemMsg, renderToolUse,
-         appendHistoryTokenBar, sendMessage, stopProcessing, attachImage } from './chat.js';
+         appendHistoryTokenBar, appendContextBar, sendMessage, stopProcessing, attachImage,
+         flushToolBatch, applyChatDensity, coerceTs } from './chat.js';
 import { setHash, syncHash } from './router.js';
 import { initSettings, openSettings } from './settings.js';
 
@@ -15,8 +19,8 @@ const AuthScreen = () => `
   <div id="auth-screen" class="flex items-center justify-center h-full p-4">
     <div class="card bg-base-200 border border-base-300 w-full max-w-sm shadow-xl">
       <div class="card-body gap-3 p-8">
-        <h1 class="text-xl font-bold">🤖 Claude Code</h1>
-        <p id="auth-subtitle" class="text-sm text-base-content/60 mb-1">Sign in to your workspace</p>
+        <h1 class="text-xl font-bold">🤖 Agent UI</h1>
+        <p id="auth-subtitle" class="text-sm text-base-content/60 mb-1">Claude · Codex · Grok</p>
         <label class="form-control">
           <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Username</span></div>
           <input id="auth-username" type="text" class="input input-bordered input-sm" placeholder="username" autocomplete="username">
@@ -36,7 +40,7 @@ const AppShell = () => `
   <div id="app" class="hidden flex-col flex-1 overflow-hidden">
     <div class="flex items-center gap-2 px-3 bg-base-200 border-b border-base-300 flex-shrink-0" style="height:44px">
       <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
-      <span class="font-semibold text-sm hidden sm:inline">🤖 Claude Code</span>
+      <span class="font-semibold text-sm hidden sm:inline">🤖 Agent UI</span>
       <span class="text-base-300 hidden sm:inline">/</span>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
       <div class="flex gap-2">
@@ -47,18 +51,38 @@ const AppShell = () => `
       </div>
     </div>
     <div class="flex flex-1 overflow-hidden relative">
-      <div id="sidebar" class="bg-base-200 border-r border-base-300 flex flex-col flex-shrink-0 overflow-hidden" style="width:260px;min-width:160px;max-width:480px">
+      <div id="sidebar" class="bg-base-200 border-r border-base-300 flex flex-col flex-shrink-0 overflow-hidden" style="width:280px;min-width:180px;max-width:520px">
         <div class="flex items-center justify-between px-3 py-2 border-b border-base-300 flex-shrink-0">
-          <span class="text-xs uppercase tracking-wider text-base-content/50 font-medium">Sessions</span>
+          <span class="text-xs uppercase tracking-wider text-base-content/50 font-medium">Projects</span>
           <div class="flex items-center gap-1">
             <span id="session-filter-badge" class="hidden text-[10px] text-primary cursor-pointer">× filter</span>
-            <button id="session-sort-btn" class="btn btn-ghost btn-xs px-1 text-[10px] text-base-content/40" title="Sort">⇅ time</button>
+            <button id="sidebar-refresh" class="btn btn-ghost btn-xs px-1 text-[10px] text-base-content/40" title="Refresh">↻</button>
           </div>
         </div>
         <div id="ws-tabs" class="flex overflow-x-auto border-b border-base-300 flex-shrink-0" style="scrollbar-width:none"></div>
-        <div class="px-2 py-1.5 border-b border-base-300 flex-shrink-0">
-          <input id="session-search" type="text" placeholder="Search path or name…"
+        <div class="px-2 py-1.5 border-b border-base-300 flex-shrink-0 flex flex-col gap-1.5">
+          <input id="session-search" type="text" placeholder="Search projects & recent work…"
             class="input input-xs input-bordered w-full text-xs" autocomplete="off">
+          <div class="flex items-center gap-1 flex-wrap">
+            <div id="view-tabs" class="flex rounded-md border border-base-300 overflow-hidden text-[10px]">
+              <button data-view="projects" class="px-2 py-0.5 bg-primary/15 text-primary font-medium">Projects</button>
+              <button data-view="timeline" class="px-2 py-0.5 text-base-content/50 hover:bg-base-300">Recent</button>
+            </div>
+            <select id="time-range" class="select select-xs select-bordered text-[10px] h-6 min-h-0 py-0 pl-1 pr-6" title="Time range">
+              <option value="1">Today</option>
+              <option value="7">7d</option>
+              <option value="14" selected>14d</option>
+              <option value="30">30d</option>
+              <option value="0">All</option>
+            </select>
+          </div>
+          <div id="agent-filter" class="flex gap-1 flex-wrap">
+            <button data-agent-filter="all" class="agent-pill active">All</button>
+            <button data-agent-filter="claude" class="agent-pill">Claude</button>
+            <button data-agent-filter="codex" class="agent-pill">Codex</button>
+            <button data-agent-filter="grok" class="agent-pill">Grok</button>
+          </div>
+          <div id="search-status" class="hidden text-[10px] text-base-content/40 px-0.5"></div>
         </div>
         <div id="session-list" class="overflow-y-auto flex-1"></div>
       </div>
@@ -70,8 +94,8 @@ const AppShell = () => `
       </div>
       <div id="main" class="flex-1 flex flex-col overflow-hidden min-w-0">
         <div id="welcome" class="flex-1 flex flex-col items-center justify-center gap-3 text-base-content/50 p-6 text-center">
-          <h2 class="text-lg font-semibold text-base-content">Welcome to Claude Code</h2>
-          <p class="text-sm">Select a session or start a new one</p>
+          <h2 class="text-lg font-semibold text-base-content">Welcome</h2>
+          <p class="text-sm">Claude · Codex · Grok — select a session or start a new one</p>
           <button id="btn-new-session-welcome" class="btn btn-primary btn-sm mt-2">＋ New Session</button>
         </div>
         <div id="project-view" class="hidden flex-col flex-1 overflow-hidden">
@@ -91,6 +115,11 @@ const AppShell = () => `
             <div id="permission-requests"></div>
             <div class="flex flex-col border-t border-base-300 bg-base-200 flex-shrink-0">
               <div id="chat-opts" class="hidden flex items-center gap-1.5 px-3 pt-2 flex-wrap">
+                <select id="sel-agent" class="select select-xs select-bordered text-xs font-semibold" title="Agent">
+                  <option value="claude">Claude</option>
+                  <option value="codex">Codex</option>
+                  <option value="grok">Grok</option>
+                </select>
                 <select id="sel-model" class="select select-xs select-bordered font-mono text-xs" title="Model">
                   <option value="claude-sonnet-4-5">sonnet-4-5</option>
                   <option value="claude-sonnet-4-6">sonnet-4-6</option>
@@ -112,10 +141,15 @@ const AppShell = () => `
                   <option value="plan">plan</option>
                   <option value="bypassPermissions">⚠ bypass all</option>
                 </select>
+                <select id="sel-density" class="select select-xs select-bordered text-xs" title="Chat density — how tools are shown">
+                  <option value="clean">density: clean</option>
+                  <option value="normal">density: normal</option>
+                  <option value="full">density: full</option>
+                </select>
               </div>
               <div class="flex gap-2 items-end px-3 pt-2 pb-2">
                 <button id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options" style="height:40px">⚙</button>
-                <textarea id="chat-input" rows="1" placeholder="Ask Claude… (!cmd shell · ⌘↵ send)"
+                <textarea id="chat-input" rows="1" placeholder="Ask… (!cmd shell · ⌘↵ send)"
                   class="textarea textarea-bordered flex-1 text-sm resize-none leading-relaxed"
                   style="min-height:40px;max-height:140px"></textarea>
                 <button id="send-btn" class="btn btn-primary btn-sm flex-shrink-0" style="height:40px">Send</button>
@@ -173,12 +207,20 @@ const AppShell = () => `
       <h3 class="font-bold text-base mb-4">＋ New Session</h3>
       <div class="flex flex-col gap-3">
         <label class="form-control">
+          <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Agent</span></div>
+          <select id="new-session-agent" class="select select-bordered select-sm">
+            <option value="claude">Claude Code</option>
+            <option value="codex">OpenAI Codex</option>
+            <option value="grok">Grok</option>
+          </select>
+        </label>
+        <label class="form-control">
           <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Working Directory</span></div>
           <input id="new-session-path" type="text" class="input input-bordered input-sm font-mono"
             placeholder="~/projects/my-app" autocomplete="off">
         </label>
-        <label class="form-control">
-          <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Workspace</span></div>
+        <label class="form-control" id="new-session-ws-wrap">
+          <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Claude Workspace</span></div>
           <select id="new-session-workspace" class="select select-bordered select-sm"></select>
         </label>
         <div id="new-session-error" class="alert alert-error text-xs py-2 hidden"></div>
@@ -230,62 +272,247 @@ function formatTime(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
-function sessionItemHtml(s) {
-  const active    = ctx.sessionId === s.sessionId;
-  const multiWs   = workspacesData.peek().length > 1;
-  const wsName    = s.configDir ? s.configDir.split('/').pop() : '';
-  const wsBadge   = multiWs && wsName
-    ? `<span class="text-[9px] text-base-content/30 flex-shrink-0 font-mono">${esc(wsName)}</span>`
+function agentBadge(agent, compact = true) {
+  const a = agent || 'claude';
+  const colors = {
+    claude: 'bg-orange-500/15 text-orange-400',
+    codex:  'bg-emerald-500/15 text-emerald-400',
+    grok:   'bg-sky-500/15 text-sky-400',
+  };
+  const cls = colors[a] || 'bg-base-300 text-base-content/50';
+  const label = compact
+    ? (a === 'claude' ? 'CC' : a === 'codex' ? 'CX' : a === 'grok' ? 'GX' : a.slice(0, 2).toUpperCase())
+    : (AGENT_LABELS[a] || a);
+  return `<span class="text-[9px] px-1 py-0.5 rounded font-mono font-semibold flex-shrink-0 ${cls}" title="${esc(AGENT_LABELS[a] || a)}">${label}</span>`;
+}
+
+function agentCountPills(agents) {
+  return Object.entries(agents || {})
+    .filter(([, n]) => n > 0)
+    .map(([a, n]) => `${agentBadge(a)}<span class="text-[9px] text-base-content/40 -ml-0.5">${n}</span>`)
+    .join('');
+}
+
+function shortPath(cwd) {
+  if (!cwd) return '';
+  const home = ''; // browser can't know home reliably; show last 2 segments if long
+  const parts = cwd.split('/').filter(Boolean);
+  if (parts.length <= 3) return cwd;
+  return '…/' + parts.slice(-2).join('/');
+}
+
+function sessionItemHtml(s, { showProject = false } = {}) {
+  const active = ctx.sessionId === s.sessionId && (ctx.agent || currentAgent.peek()) === (s.agent || 'claude');
+  const title  = s.snippet && sessionSearch.peek()
+    ? s.snippet
+    : (s.display || s.sessionId.slice(0, 8));
+  const projectLine = showProject
+    ? `<div class="text-[10px] text-base-content/40 font-mono truncate" title="${esc(s.cwd || '')}">${esc(s.projectName || shortPath(s.cwd) || '—')}</div>`
     : '';
-  return `<div class="px-3 py-2 cursor-pointer hover:bg-base-300 border-l-2
+  return `<div class="px-2.5 py-1.5 cursor-pointer hover:bg-base-300 border-l-2
               ${active ? 'border-primary bg-primary/5' : 'border-transparent'}"
        data-session-id="${esc(s.sessionId)}"
        data-session-cwd="${esc(s.cwd || '')}"
-       data-session-config-dir="${esc(s.configDir || '')}">
-    <div class="text-xs font-mono truncate ${active ? 'text-primary' : 'text-base-content/80'}"
-         title="${esc(s.cwd || '')}">${esc(s.cwd || '(no path)')}</div>
-    <div class="flex items-center justify-between mt-0.5 gap-2">
-      <span class="text-[10px] text-base-content/40 truncate flex-1">${esc(s.display || s.sessionId.slice(0,8))}</span>
-      <div class="flex items-center gap-1.5 flex-shrink-0">${wsBadge}<span class="text-[10px] text-base-content/30">${formatTime(s.updatedAt)}</span></div>
+       data-session-config-dir="${esc(s.configDir || '')}"
+       data-session-agent="${esc(s.agent || 'claude')}">
+    <div class="flex items-start gap-1.5">
+      ${agentBadge(s.agent)}
+      <div class="min-w-0 flex-1">
+        <div class="text-[11px] leading-snug truncate ${active ? 'text-primary font-medium' : 'text-base-content/85'}"
+             title="${esc(s.display || '')}">${esc(title)}</div>
+        ${projectLine}
+      </div>
+      <span class="text-[9px] text-base-content/30 flex-shrink-0 mt-0.5">${formatTime(s.updatedAt)}</span>
     </div>
   </div>`;
 }
 
-// Group sessions by their cwd (folder). Each folder is a collapsible header;
-// collapsed by default, expand to reveal the sessions inside.
-function renderSessionList(sessions) {
-  if (!sessions.length) return '<div class="px-3 py-4 text-xs text-base-content/40">No sessions</div>';
+function refreshModelSelect() {
+  const sel = $('sel-model');
+  if (!sel) return;
+  const agent = currentAgent.peek() || 'claude';
+  const models = AGENT_MODELS[agent] || AGENT_MODELS.claude;
+  const cur = currentModel.peek();
+  sel.innerHTML = models.map(m =>
+    `<option value="${esc(m.value)}" ${m.value === cur ? 'selected' : ''}>${esc(m.label)}</option>`
+  ).join('');
+  if (!models.some(m => m.value === cur)) {
+    const def = AGENT_DEFAULT_MODEL[agent] || models[0]?.value;
+    currentModel.value = def;
+    localStorage.setItem('model', def);
+    sel.value = def;
+  } else {
+    sel.value = cur;
+  }
+  const agentSel = $('sel-agent');
+  if (agentSel) agentSel.value = agent;
+}
 
-  const groups = new Map();
-  for (const s of sessions) {
-    const key = s.cwd || '(no path)';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(s);
+function renderProjectGroups(groups) {
+  if (!groups.length) {
+    return `<div class="px-3 py-6 text-center text-xs text-base-content/40">
+      No projects in this range.<br>
+      <span class="text-base-content/30">Try “All” time or another agent.</span>
+    </div>`;
   }
 
   const expanded = expandedFolders.value;
-  // A search auto-expands every matching folder so results are visible.
-  const forceOpen = !!sessionSearch.value.trim();
+  const forceOpen = !!sessionSearch.value.trim() || groups.length <= 3;
+  // Auto-expand the most recently active project
+  const topCwd = groups[0]?.cwd || '(no path)';
 
-  return [...groups.entries()].map(([cwd, items]) => {
-    const open  = forceOpen || expanded.has(cwd);
-    const name  = cwd === '(no path)' ? '(no path)' : (cwd.split('/').filter(Boolean).pop() || cwd);
+  return groups.map(g => {
+    const key = g.cwd || '(no path)';
+    const open = forceOpen || expanded.has(key) || key === topCwd;
+    const latestTitle = g.latest?.display || g.latest?.snippet || '';
     const header = `
-      <div class="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-base-300 select-none"
-           data-folder="${esc(cwd)}">
-        <span class="text-[10px] text-base-content/40 w-3 flex-shrink-0">${open ? '▾' : '▸'}</span>
-        <span class="text-xs font-medium truncate flex-1" title="${esc(cwd)}">${esc(name)}</span>
-        <span class="text-[10px] text-base-content/30 flex-shrink-0">${items.length}</span>
+      <div class="project-header px-2.5 py-2 cursor-pointer hover:bg-base-300/80 select-none border-b border-base-300/40"
+           data-folder="${esc(key)}" data-project-cwd="${esc(g.cwd || '')}">
+        <div class="flex items-center gap-1.5">
+          <span class="text-[10px] text-base-content/40 w-3 flex-shrink-0">${open ? '▾' : '▸'}</span>
+          <span class="text-[12px] font-semibold truncate flex-1" title="${esc(g.cwd || '')}">${esc(g.projectName)}</span>
+          <span class="text-[9px] text-base-content/30 flex-shrink-0">${formatTime(g.updatedAt)}</span>
+        </div>
+        <div class="flex items-center gap-1.5 mt-0.5 pl-4">
+          <span class="text-[10px] text-base-content/35 font-mono truncate flex-1" title="${esc(g.cwd || '')}">${esc(shortPath(g.cwd))}</span>
+          <span class="flex items-center gap-0.5 flex-shrink-0">${agentCountPills(g.agents)}</span>
+        </div>
+        ${latestTitle && !open ? `<div class="pl-4 mt-0.5 text-[10px] text-base-content/45 truncate" title="${esc(latestTitle)}">↳ ${esc(latestTitle)}</div>` : ''}
       </div>`;
-    const body = open ? `<div class="border-l border-base-300 ml-3">${items.map(sessionItemHtml).join('')}</div>` : '';
+    const sessions = g.sessions.slice(0, 40);
+    const more = g.sessions.length > 40
+      ? `<div class="px-3 py-1 text-[10px] text-base-content/30">+${g.sessions.length - 40} more</div>` : '';
+    const body = open
+      ? `<div class="pb-1 border-b border-base-300/30">${sessions.map(s => sessionItemHtml(s)).join('')}${more}</div>`
+      : '';
     return header + body;
   }).join('');
+}
+
+function renderTimeline(sessions) {
+  if (!sessions.length) {
+    return `<div class="px-3 py-6 text-center text-xs text-base-content/40">
+      No recent activity.<br>
+      <span class="text-base-content/30">Widen the time range or clear filters.</span>
+    </div>`;
+  }
+
+  // Group by day for readability
+  const byDay = new Map();
+  for (const s of sessions) {
+    const d = s.updatedAt ? new Date(s.updatedAt) : new Date();
+    const key = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(s);
+  }
+
+  return [...byDay.entries()].map(([day, items]) => `
+    <div class="px-2.5 pt-2.5 pb-1 text-[10px] uppercase tracking-wide text-base-content/35 font-medium sticky top-0 bg-base-200/95 backdrop-blur-sm z-[1]">${esc(day)}</div>
+    ${items.map(s => sessionItemHtml(s, { showProject: true })).join('')}
+  `).join('');
+}
+
+function renderSessionList() {
+  const view = sidebarView.value;
+  if (view === 'timeline') {
+    return renderTimeline(filteredSessions.value);
+  }
+  return renderProjectGroups(projectGroups.value);
+}
+
+function syncSidebarChrome() {
+  // View tabs
+  document.querySelectorAll('[data-view]').forEach(btn => {
+    const on = btn.dataset.view === sidebarView.peek();
+    btn.classList.toggle('bg-primary/15', on);
+    btn.classList.toggle('text-primary', on);
+    btn.classList.toggle('font-medium', on);
+    btn.classList.toggle('text-base-content/50', !on);
+  });
+  // Agent pills
+  document.querySelectorAll('[data-agent-filter]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.agentFilter === agentFilter.peek());
+  });
+  const tr = $('time-range');
+  if (tr && tr.value !== timeRange.peek()) tr.value = timeRange.peek();
+
+  const status = $('search-status');
+  if (!status) return;
+  const hits = activityHits.peek();
+  const q = sessionSearch.peek().trim();
+  if (activityLoading.peek()) {
+    status.classList.remove('hidden');
+    status.textContent = 'Searching content…';
+  } else if (q && hits?.results) {
+    status.classList.remove('hidden');
+    status.textContent = `${hits.results.length} hit${hits.results.length === 1 ? '' : 's'} · ${timeRange.peek() === '0' ? 'all time' : timeRange.peek() + 'd'}${hits.deep === false ? '' : ' (incl. content)'}`;
+  } else if (q) {
+    status.classList.remove('hidden');
+    status.textContent = 'Local filter only — type to deep-search';
+  } else {
+    const n = filteredSessions.peek().length;
+    const pg = projectGroups.peek().length;
+    status.classList.remove('hidden');
+    status.textContent = sidebarView.peek() === 'projects'
+      ? `${pg} project${pg === 1 ? '' : 's'} · ${n} session${n === 1 ? '' : 's'}`
+      : `${n} recent session${n === 1 ? '' : 's'}`;
+  }
+}
+
+// Debounced deep search against /api/activity
+let _searchTimer = null;
+async function runActivitySearch(q) {
+  const query = (q || '').trim();
+  if (!query) {
+    activityHits.value = null;
+    activityLoading.value = false;
+    return;
+  }
+  activityLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      days: timeRange.peek() || '14',
+      limit: '50',
+      deep: '1',
+    });
+    if (agentFilter.peek() && agentFilter.peek() !== 'all') {
+      params.set('agent', agentFilter.peek());
+    }
+    const data = await api('GET', `/api/activity?${params}`);
+    // Only apply if query still matches
+    if (sessionSearch.peek().trim() === query) {
+      activityHits.value = { q: query.toLowerCase(), results: data.results || [], deep: true };
+    }
+  } catch (e) {
+    if (sessionSearch.peek().trim() === query) {
+      activityHits.value = { q: query.toLowerCase(), results: [], error: e.message };
+    }
+  } finally {
+    activityLoading.value = false;
+  }
+}
+
+function scheduleActivitySearch(q) {
+  clearTimeout(_searchTimer);
+  const query = (q || '').trim();
+  if (!query) {
+    activityHits.value = null;
+    activityLoading.value = false;
+    return;
+  }
+  _searchTimer = setTimeout(() => runActivitySearch(query), 350);
 }
 
 function mdToHtml(text) {
   if (!text) return '';
   if (typeof marked === 'undefined') return `<pre class="whitespace-pre-wrap text-xs">${esc(text)}</pre>`;
-  try { return marked.parse(text, { breaks: true, gfm: true }); } catch { return `<pre class="whitespace-pre-wrap text-xs">${esc(text)}</pre>`; }
+  try {
+    // Prefer shared renderer if chat has configured marked
+    return marked.parse(String(text), { breaks: true, gfm: true });
+  } catch {
+    return `<pre class="whitespace-pre-wrap text-xs">${esc(text)}</pre>`;
+  }
 }
 
 // Load the persistent memory for the currently open session into the Memory tab.
@@ -298,16 +525,17 @@ async function loadMemoryTab() {
   }
   body.innerHTML = '<div class="p-4 text-xs text-base-content/40">Loading…</div>';
   try {
-    const mem = await api('GET', `/api/sessions/${ctx.sessionId}/memory`);
+    const q = new URLSearchParams({ agent: ctx.agent || currentAgent.peek() || 'claude' });
+    const mem = await api('GET', `/api/sessions/${ctx.sessionId}/memory?${q}`);
     const parts = [];
     if (mem.index) {
       parts.push(`<div class="mb-4"><div class="text-[11px] uppercase tracking-wide text-base-content/40 mb-1">Index (MEMORY.md)</div>
-                  <div class="prose prose-sm max-w-none">${mdToHtml(mem.index)}</div></div>`);
+                  <div class="md">${mdToHtml(mem.index)}</div></div>`);
     }
     for (const f of (mem.files || [])) {
       parts.push(`<div class="mb-3 border border-base-300 rounded-lg overflow-hidden">
                     <div class="px-3 py-1.5 bg-base-300/50 text-xs font-mono text-base-content/70">${esc(f.name)}</div>
-                    <div class="px-3 py-2 prose prose-sm max-w-none">${mdToHtml(f.content)}</div>
+                    <div class="px-3 py-2 md">${mdToHtml(f.content)}</div>
                   </div>`);
     }
     if (!parts.length) parts.push('<div class="text-base-content/40 text-xs">No memory saved for this project yet.</div>');
@@ -330,9 +558,16 @@ export function openProject(project) {
   switchTab('chat');
 }
 
-export async function resumeSession(sid, cwd, configDir) {
+export async function resumeSession(sid, cwd, configDir, agent) {
+  const resolvedAgent = agent
+    || sessionsData.peek().find(s => s.sessionId === sid)?.agent
+    || 'claude';
   ctx.sessionId = sid;
   ctx.configDir = configDir || null;
+  ctx.agent = resolvedAgent;
+  setAgent(resolvedAgent);
+  refreshModelSelect();
+
   if (cwd && cwd !== currentProject.peek()?.path) {
     const name = cwd.split('/').filter(Boolean).pop() || cwd;
     batch(() => { currentProject.value = { id: name, name, path: cwd }; sessionFilter.value = cwd; });
@@ -345,32 +580,54 @@ export async function resumeSession(sid, cwd, configDir) {
     pv.style.display = 'flex';
     $('welcome').classList.add('hidden');
     if (!ctx.ws || ctx.ws.readyState !== WebSocket.OPEN) connectWS();
+  } else if (!currentProject.peek() && cwd) {
+    const name = cwd.split('/').filter(Boolean).pop() || cwd;
+    batch(() => { currentProject.value = { id: name, name, path: cwd }; sessionFilter.value = cwd; });
+    $('topbar-project').textContent = cwd;
+    $('welcome').classList.add('hidden');
+    const pv = $('project-view');
+    pv.classList.remove('hidden');
+    pv.style.display = 'flex';
+    if (!ctx.ws || ctx.ws.readyState !== WebSocket.OPEN) connectWS();
   }
   clearMessages();
   switchTab('chat');
   sessionsData.value = [...sessionsData.peek()];
 
-  appendSystemMsg('Loading history…');
+  const label = AGENT_LABELS[resolvedAgent] || resolvedAgent;
+  appendSystemMsg(`Loading ${label} history…`);
   try {
-    const msgs = await api('GET', `/api/sessions/${sid}/messages`);
+    const q = new URLSearchParams({ agent: resolvedAgent });
+    const data = await api('GET', `/api/sessions/${sid}/messages?${q}`);
+    // Support both legacy array and { messages, context }
+    const msgs = Array.isArray(data) ? data : (data.messages || []);
+    const context = Array.isArray(data) ? null : (data.context || null);
     $('messages').innerHTML = '';
     if (!msgs.length) {
-      appendSystemMsg(`Session ${sid.slice(0,8)}… — no history`);
+      appendSystemMsg(`${label} · ${sid.slice(0,8)}… — no history`);
     } else {
+      flushToolBatch();
       for (const m of msgs) {
-        if (m.type === 'text')
-          appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : 'Claude', m.content);
-        else if (m.type === 'tool_use')
-          renderToolUse({ name: m.name, input: m.input ?? {} });
-        else if (m.type === 'token_usage')
+        const ts = coerceTs(m.ts ?? m.timestamp);
+        if (m.type === 'text') {
+          if (m.role === 'assistant' || m.role === 'user') flushToolBatch();
+          appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : label, m.content, { ts });
+        } else if (m.type === 'tool_use') {
+          renderToolUse({ name: m.name, input: m.input ?? {} }, { ts });
+        } else if (m.type === 'token_usage') {
+          flushToolBatch();
           appendHistoryTokenBar(m.usage);
+        }
       }
-      const turnCount = msgs.filter(m => m.type === 'token_usage').length;
-      appendSystemMsg(`── history loaded · ${turnCount} turn${turnCount !== 1 ? 's' : ''} ──`);
+      flushToolBatch();
+      if (context) appendContextBar(context);
+      const turnCount = msgs.filter(m => m.type === 'token_usage').length
+        || msgs.filter(m => m.role === 'user').length;
+      appendSystemMsg(`── ${label} history · ${turnCount} turn${turnCount !== 1 ? 's' : ''} ──`);
     }
   } catch (e) {
     $('messages').innerHTML = '';
-    appendSystemMsg(`Session ${sid.slice(0,8)}… (history unavailable: ${e.message})`);
+    appendSystemMsg(`${label} · ${sid.slice(0,8)}… (history unavailable: ${e.message})`);
   }
   syncHash();
 }
@@ -456,7 +713,19 @@ function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('theme', theme);
   const btn = $('btn-theme');
-  if (btn) btn.textContent = theme === 'dark' ? '🌙' : '☀️';
+  if (btn) btn.textContent = theme === 'dark' || theme === 'night' || theme === 'black' ? '🌙' : '☀️';
+  // Swap highlight.js stylesheet for light/dark
+  let link = document.getElementById('hljs-theme');
+  if (!link) {
+    link = document.querySelector('link[href*="highlight"][href*="styles"]');
+    if (link) link.id = 'hljs-theme';
+  }
+  if (link) {
+    const dark = theme === 'dark' || theme === 'night' || theme === 'black';
+    link.href = dark
+      ? 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/github-dark.min.css'
+      : 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/github.min.css';
+  }
 }
 
 function toggleTheme() {
@@ -466,6 +735,8 @@ function toggleTheme() {
 
 // ── New Session modal ─────────────────────────────────────────────────────────
 function openNewSessionModal() {
+  const agentSel = $('new-session-agent');
+  if (agentSel) agentSel.value = currentAgent.peek() || 'claude';
   const sel = $('new-session-workspace');
   if (sel) {
     const wss = workspacesData.peek();
@@ -475,15 +746,23 @@ function openNewSessionModal() {
     // pre-select current session's workspace
     if (ctx.configDir) sel.value = ctx.configDir;
   }
+  updateNewSessionAgentUI();
   $('new-session-path').value = currentProject.peek()?.path || '';
   $('new-session-error').classList.add('hidden');
   $('modal-new-session').showModal();
   setTimeout(() => $('new-session-path').focus(), 50);
 }
 
+function updateNewSessionAgentUI() {
+  const agent = $('new-session-agent')?.value || 'claude';
+  const wrap = $('new-session-ws-wrap');
+  if (wrap) wrap.style.display = agent === 'claude' ? '' : 'none';
+}
+
 async function startNewSession() {
   const rawPath  = $('new-session-path').value.trim();
-  const configDir = $('new-session-workspace').value;
+  const agent    = $('new-session-agent')?.value || 'claude';
+  const configDir = agent === 'claude' ? $('new-session-workspace').value : null;
   const errEl    = $('new-session-error');
   errEl.classList.add('hidden');
 
@@ -498,6 +777,11 @@ async function startNewSession() {
     const name = result.path.split('/').filter(Boolean).pop() || result.path;
     ctx.sessionId = null;
     ctx.configDir = configDir || null;
+    ctx.agent = agent;
+    setAgent(agent);
+    currentModel.value = AGENT_DEFAULT_MODEL[agent] || currentModel.peek();
+    localStorage.setItem('model', currentModel.peek());
+    refreshModelSelect();
     batch(() => {
       currentProject.value = { id: name, name, path: result.path };
       sessionFilter.value  = result.path;
@@ -510,7 +794,7 @@ async function startNewSession() {
     clearMessages();
     connectWS();
     switchTab('chat');
-    appendSystemMsg(`New session · ${result.path}`);
+    appendSystemMsg(`New ${AGENT_LABELS[agent] || agent} session · ${result.path}`);
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.remove('hidden');
@@ -544,11 +828,18 @@ export function initShell() {
     }).join('');
   });
 
-  // 3. Reactive session list
+  // 3. Reactive session list + chrome
   effect(() => {
+    // touch reactive deps
+    void filteredSessions.value;
+    void projectGroups.value;
+    void sidebarView.value;
+    void activityLoading.value;
+    void activityHits.value;
     const el = $('session-list');
     if (!el) return;
-    el.innerHTML = renderSessionList(filteredSessions.value);
+    el.innerHTML = renderSessionList();
+    syncSidebarChrome();
   });
 
   // 3. Filter badge
@@ -586,7 +877,7 @@ export function initShell() {
   // 7. Router: deep-link to a session by id
   document.addEventListener('router:session', async ({ detail: { id, tab } }) => {
     const s = sessionsData.peek().find(s => s.sessionId === id);
-    await resumeSession(id, s?.cwd || null, s?.configDir || null);
+    await resumeSession(id, s?.cwd || null, s?.configDir || null, s?.agent || null);
     if (tab && ['chat','files','git','shell','memory'].includes(tab)) switchTab(tab);
   });
 
@@ -596,18 +887,48 @@ export function initShell() {
   delegate.on('click', '#hamburger', () => $('sidebar').classList.contains('open') ? closeSidebar() : openSidebar());
   delegate.on('click', '#sidebar-overlay', closeSidebar);
 
-  delegate.on('input', '#session-search', (_, el) => { sessionSearch.value = el.value; });
-  delegate.on('click', '#session-sort-btn', () => {
-    sessionSort.value = sessionSort.peek() === 'time' ? 'project' : 'time';
-    $('session-sort-btn').textContent = `⇅ ${sessionSort.peek()}`;
+  delegate.on('input', '#session-search', (_, el) => {
+    sessionSearch.value = el.value;
+    scheduleActivitySearch(el.value);
   });
   delegate.on('click', '#session-filter-badge', () => { sessionFilter.value = null; });
   delegate.on('click', '[data-ws-tab]', (_, el) => { sessionFilter.value = el.dataset.wsTab || null; });
+  delegate.on('click', '#sidebar-refresh', () => {
+    loadAllSessions();
+    if (sessionSearch.peek().trim()) runActivitySearch(sessionSearch.peek());
+  });
+  delegate.on('click', '[data-view]', (_, el) => {
+    sidebarView.value = el.dataset.view;
+    localStorage.setItem('sidebarView', el.dataset.view);
+  });
+  delegate.on('click', '[data-agent-filter]', (_, el) => {
+    agentFilter.value = el.dataset.agentFilter;
+    localStorage.setItem('agentFilter', el.dataset.agentFilter);
+    if (sessionSearch.peek().trim()) scheduleActivitySearch(sessionSearch.peek());
+  });
+  delegate.on('change', '#time-range', (_, el) => {
+    timeRange.value = el.value;
+    localStorage.setItem('timeRange', el.value);
+    if (sessionSearch.peek().trim()) scheduleActivitySearch(sessionSearch.peek());
+  });
+  // Double-click project header → open project (filter + new chat context)
+  delegate.on('dblclick', '[data-project-cwd]', (_, el) => {
+    const cwd = el.dataset.projectCwd;
+    if (!cwd) return;
+    const name = cwd.split('/').filter(Boolean).pop() || cwd;
+    openProject({ id: name, name, path: cwd });
+    appendSystemMsg(`Project · ${cwd}`);
+  });
   delegate.on('click', '#btn-settings', openSettings);
   delegate.on('click', '#btn-theme', toggleTheme);
 
   delegate.on('click', '[data-session-id]', (e, el) => {
-    resumeSession(el.dataset.sessionId, el.dataset.sessionCwd || null, el.dataset.sessionConfigDir || null);
+    resumeSession(
+      el.dataset.sessionId,
+      el.dataset.sessionCwd || null,
+      el.dataset.sessionConfigDir || null,
+      el.dataset.sessionAgent || 'claude',
+    );
     closeSidebarOnMobile();
   });
 
@@ -646,18 +967,57 @@ export function initShell() {
     $('chat-opts').classList.toggle('hidden');
   });
 
-  // Model / effort / permission selectors
-  delegate.on('change', '#sel-model',      (_, el) => { currentModel.value      = el.value; });
+  // Agent / model / effort / permission selectors
+  delegate.on('change', '#sel-agent', (_, el) => {
+    const prev = currentAgent.peek();
+    const next = el.value;
+    if (prev !== next) {
+      ctx.sessionId = null;
+      setAgent(next);
+      currentModel.value = AGENT_DEFAULT_MODEL[next] || currentModel.peek();
+      localStorage.setItem('model', currentModel.peek());
+      refreshModelSelect();
+      appendSystemMsg(`Agent → ${AGENT_LABELS[next] || next} · model ${currentModel.peek()} · new session`);
+    }
+  });
+  delegate.on('change', '#sel-model', (_, el) => {
+    currentModel.value = el.value;
+    localStorage.setItem('model', el.value);
+  });
   delegate.on('change', '#sel-effort',     (_, el) => { currentEffort.value     = el.value; });
   delegate.on('change', '#sel-permission', (_, el) => { currentPermission.value = el.value; });
+  delegate.on('change', '#sel-density', (_, el) => {
+    setChatDensity(el.value);
+    appendSystemMsg(`Density → ${el.value} (applies to new tool calls; reload session to re-group history)`);
+  });
+  document.addEventListener('agent-changed', refreshModelSelect);
 
   delegate.on('click', '#btn-new-session, #btn-new-session-welcome', openNewSessionModal);
   delegate.on('click', '#new-session-cancel', () => $('modal-new-session').close());
   delegate.on('click', '#new-session-start',  startNewSession);
+  delegate.on('change', '#new-session-agent', updateNewSessionAgentUI);
   delegate.on('keydown', '#new-session-path', e => { if (e.key === 'Enter') startNewSession(); });
   delegate.on('click', '#send-btn',        sendMessage);
   delegate.on('click', '#stop-btn',        stopProcessing);
   delegate.on('click', '#btn-logout',      () => { ctx.token = null; localStorage.removeItem('token'); location.reload(); });
+
+  // Restore agent/model selectors + sidebar filters after DOM is ready
+  refreshModelSelect();
+  applyChatDensity();
+  const dens = $('sel-density');
+  if (dens) dens.value = chatDensity.peek() || 'normal';
+  const tr = $('time-range');
+  if (tr) tr.value = timeRange.peek() || '14';
+  document.querySelectorAll('[data-agent-filter]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.agentFilter === agentFilter.peek());
+  });
+  document.querySelectorAll('[data-view]').forEach(btn => {
+    const on = btn.dataset.view === sidebarView.peek();
+    btn.classList.toggle('bg-primary/15', on);
+    btn.classList.toggle('text-primary', on);
+    btn.classList.toggle('font-medium', on);
+    btn.classList.toggle('text-base-content/50', !on);
+  });
 }
 
 async function submitAuth() {

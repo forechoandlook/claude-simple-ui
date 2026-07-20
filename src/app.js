@@ -6,13 +6,21 @@ import bcrypt from 'bcrypt';
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import fsSync from 'fs';
-import readline from 'readline';
 import path from 'path';
 import os from 'os';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-
+import { runClaude } from './agents/claude.js';
+import { runCodex } from './agents/codex.js';
+import { runGrok } from './agents/grok.js';
+import {
+  scanAllSessions,
+  loadSessionMessages,
+  loadSessionMemory,
+  searchActivity,
+  groupByProject,
+  toClientSession,
+} from './agents/sessions.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
 
@@ -21,6 +29,15 @@ export const PORT = parseInt(process.env.PORT || '3000');
 const CREDENTIALS_FILE  = process.env.CREDENTIALS_FILE  || path.join(rootDir, '.credentials.json');
 const WORKSPACES_FILE   = process.env.WORKSPACES_FILE   || path.join(rootDir, '.workspaces.json');
 const CLAUDE_CLI_PATH = process.env.CLAUDE_CLI_PATH || 'claude';
+const CODEX_CLI_PATH  = process.env.CODEX_CLI_PATH  || 'codex';
+const GROK_CLI_PATH   = process.env.GROK_CLI_PATH   || 'grok';
+const CODEX_HOME = (process.env.CODEX_HOME || path.join(os.homedir(), '.codex')).replace(/^~/, os.homedir());
+const GROK_HOME  = (process.env.GROK_HOME  || path.join(os.homedir(), '.grok')).replace(/^~/, os.homedir());
+const ENABLED_AGENTS = (() => {
+  const raw = (process.env.AGENTS || 'claude,codex,grok')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  return [...new Set(raw.length ? raw : ['claude', 'codex', 'grok'])];
+})();
 const CLAUDE_CONFIG_DIRS = (() => {
   const dirs = (process.env.CLAUDE_CONFIG_DIRS || '')
     .split(',').map(s => s.trim().replace(/^~/, os.homedir())).filter(Boolean);
@@ -174,188 +191,46 @@ async function isGitRepo(dir) {
   catch { return false; }
 }
 
-// ─── Claude session scanning ──────────────────────────────────────────────────
-async function loadHistoryNames() {
-  const map = new Map();
-  await Promise.all(CLAUDE_CONFIG_DIRS.map(async dir => {
-    try {
-      const stream = fsSync.createReadStream(path.join(dir, 'history.jsonl'));
-      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-      for await (const line of rl) {
-        try {
-          const d = JSON.parse(line);
-          if (d.sessionId && d.display) map.set(d.sessionId, d.display);
-        } catch {}
-      }
-    } catch {}
-  }));
-  return map;
-}
-
-async function readSessionMeta(filePath) {
-  let sessionId = null;
-  let cwd = null;
-  try {
-    const stream = fsSync.createReadStream(filePath);
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    for await (const line of rl) {
-      try {
-        const d = JSON.parse(line);
-        if (!sessionId && d.sessionId) sessionId = d.sessionId;
-        if (!cwd && d.cwd) cwd = d.cwd;
-        if (sessionId && cwd) { rl.close(); stream.destroy(); break; }
-      } catch {}
-    }
-  } catch {}
-  return { sessionId, cwd };
-}
-
-async function readSessionFirstMessage(filePath) {
-  const SKIP = ['<', 'Caveat:', 'This session', '[Request'];
-  try {
-    const stream = fsSync.createReadStream(filePath);
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    for await (const line of rl) {
-      try {
-        const d = JSON.parse(line);
-        if (d.type === 'user' && Array.isArray(d.message?.content)) {
-          for (const part of d.message.content) {
-            if (part.type === 'text' && part.text?.trim()) {
-              const text = part.text.trim();
-              if (!SKIP.some(p => text.startsWith(p))) {
-                rl.close(); stream.destroy();
-                return text.slice(0, 100);
-              }
-            }
-          }
-        }
-      } catch {}
-    }
-  } catch {}
-  return null;
-}
-
-async function scanConfigDir(configDir, nameMap, filterCwd) {
-  const projectsDir = path.join(configDir, 'projects');
-  const sessions = [];
-  let projectDirs;
-  try {
-    projectDirs = (await fs.readdir(projectsDir, { withFileTypes: true })).filter(e => e.isDirectory());
-  } catch { return []; }
-
-  await Promise.all(projectDirs.map(async dirEntry => {
-    const projectDir = path.join(projectsDir, dirEntry.name);
-    let entries;
-    try { entries = await fs.readdir(projectDir, { withFileTypes: true }); }
-    catch { return; }
-
-    const hasMemory = entries.some(e =>
-      (e.isFile() && e.name === 'MEMORY.md') || (e.isDirectory() && e.name === 'memory')
-    );
-
-    const jsonlFiles = entries.filter(e =>
-      e.isFile() && e.name.endsWith('.jsonl') && !e.name.startsWith('agent-')
-    );
-    await Promise.all(jsonlFiles.map(async fileEntry => {
-      const filePath = path.join(projectDir, fileEntry.name);
-      try {
-        const [stat, meta] = await Promise.all([fs.stat(filePath), readSessionMeta(filePath)]);
-        if (filterCwd && meta.cwd !== filterCwd) return;
-        const sessionId = meta.sessionId || fileEntry.name.replace('.jsonl', '');
-        const firstMsg = await readSessionFirstMessage(filePath);
-        sessions.push({
-          sessionId,
-          cwd:        meta.cwd || null,
-          configDir,
-          display:    nameMap.get(sessionId) || firstMsg || 'Session',
-          updatedAt:  stat.mtimeMs,
-          hasMemory,
-        });
-      } catch {}
-    }));
-  }));
-  return sessions;
-}
-
-async function scanAllSessions(filterCwd = null) {
-  const nameMap = await loadHistoryNames();
-  const results = await Promise.all(CLAUDE_CONFIG_DIRS.map(d => scanConfigDir(d, nameMap, filterCwd)));
-  const seen = new Set();
-  const sessions = results.flat().filter(s => {
-    if (seen.has(s.sessionId)) return false;
-    seen.add(s.sessionId); return true;
-  });
-  return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
-// ─── Claude SDK sessions ──────────────────────────────────────────────────────
+// ─── Active agent sessions ────────────────────────────────────────────────────
 const activeSessions = new Map();
 
-function mapOptions(options = {}) {
-  const env = { ...process.env };
-  if (options.configDir) env.CLAUDE_CONFIG_DIR = options.configDir;
-  const opts = {
-    env,
-    pathToClaudeCodeExecutable: CLAUDE_CLI_PATH,
-    tools: { type: 'preset', preset: 'claude_code' },
-    systemPrompt: { type: 'preset', preset: 'claude_code' },
-    settingSources: ['project', 'user', 'local'],
-    model: options.model || 'claude-sonnet-4-5',
-  };
-  if (options.cwd)       opts.cwd    = options.cwd;
-  if (options.sessionId) opts.resume = options.sessionId;
-  if (options.effort)    opts.effort = options.effort;
-  if (options.permissionMode && options.permissionMode !== 'default') {
-    opts.permissionMode = options.permissionMode;
-  }
-  if (options.allowDangerouslySkipPermissions) {
-    opts.allowDangerouslySkipPermissions = true;
-  }
-  if (options.allowedTools?.length) opts.allowedTools = options.allowedTools;
-  return opts;
+async function listSessions(filterCwd = null, agentFilter = null) {
+  const agents = agentFilter
+    ? [agentFilter]
+    : ENABLED_AGENTS;
+  return scanAllSessions({
+    claudeConfigDirs: CLAUDE_CONFIG_DIRS,
+    codexHome: CODEX_HOME,
+    grokHome: GROK_HOME,
+    filterCwd,
+    agents,
+  });
 }
 
-async function runClaude(command, options, send) {
-  const sessionKey = options.sessionId || crypto.randomUUID();
-  const controller = new AbortController();
-
-  activeSessions.set(sessionKey, { controller, startTime: Date.now() });
-
-  const sdkOptions = mapOptions(options);
-  sdkOptions.abortSignal = controller.signal;
-
-  let capturedSessionId = null;
-
-  try {
-    const stream = query({
-      prompt: command,
-      options: sdkOptions,
-    });
-
-    for await (const msg of stream) {
-      if (msg.type === 'system' && msg.session_id && !capturedSessionId) {
-        capturedSessionId = msg.session_id;
-        send({ type: 'session-created', sessionId: capturedSessionId });
-      }
-      send(msg);
-    }
-
-    send({ type: 'complete', exitCode: 0, sessionId: capturedSessionId || sessionKey });
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      send({ type: 'complete', exitCode: 130, aborted: true, sessionId: capturedSessionId || sessionKey });
-    } else {
-      send({ type: 'error', message: err.message });
-    }
-  } finally {
-    activeSessions.delete(sessionKey);
+async function dispatchAgent(agent, command, options, send) {
+  const a = (agent || 'claude').toLowerCase();
+  if (!ENABLED_AGENTS.includes(a)) {
+    send({ type: 'error', message: `Agent "${a}" is not enabled. Enabled: ${ENABLED_AGENTS.join(', ')}` });
+    return;
+  }
+  const ctx = { activeSessions };
+  if (a === 'codex') {
+    await runCodex(command, options, send, { ...ctx, cliPath: CODEX_CLI_PATH });
+  } else if (a === 'grok') {
+    await runGrok(command, options, send, { ...ctx, cliPath: GROK_CLI_PATH });
+  } else {
+    await runClaude(command, options, send, { ...ctx, cliPath: CLAUDE_CLI_PATH });
   }
 }
 
 function abortSession(sessionId) {
   const s = activeSessions.get(sessionId);
   if (!s) return false;
-  s.controller.abort();
+  if (s.controller) s.controller.abort();
+  if (typeof s.abort === 'function') s.abort();
+  else if (s.child) {
+    try { s.child.kill('SIGTERM'); } catch {}
+  }
   return true;
 }
 
@@ -402,8 +277,19 @@ export function createApp() {
 
   const distDir   = path.join(rootDir, 'dist');
   const publicDir = path.join(rootDir, 'public');
-  const usesDist  = fsSync.existsSync(distDir) && process.env.NODE_ENV !== 'development';
-  app.use(express.static(usesDist ? distDir : publicDir));
+  // Only ship the built bundle in production. Local `node server.js` serves
+  // public/ so new modules (shell.js, state.js, …) are not 404s against stale dist/.
+  const usesDist  = process.env.NODE_ENV === 'production' && fsSync.existsSync(distDir);
+  const staticDir = usesDist ? distDir : publicDir;
+  console.log(`[static] serving ${usesDist ? 'dist/' : 'public/'} (NODE_ENV=${process.env.NODE_ENV || 'unset'})`);
+  app.use(express.static(staticDir));
+
+  // Avoid noisy favicon 404s in the browser console
+  app.get('/favicon.ico', (_req, res) => {
+    res.type('image/svg+xml').send(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1d4ed8"/><text x="16" y="22" text-anchor="middle" font-size="16" fill="white" font-family="system-ui">A</text></svg>`
+    );
+  });
 
   app.get('/api/auth/status', async (_req, res) => {
     res.json({ needsSetup: !(await hasUsers()) });
@@ -577,11 +463,67 @@ export function createApp() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  app.get('/api/agents', authMiddleware, async (_req, res) => {
+    res.json({
+      enabled: ENABLED_AGENTS,
+      defaults: {
+        claude: { model: 'claude-sonnet-4-5', models: ['claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-haiku-4-5'] },
+        codex:  { model: 'gpt-5.4', models: ['gpt-5.4', 'gpt-5.3', 'gpt-5.2', 'o3', 'o4-mini', 'codex-mini-latest'] },
+        grok:   { model: 'grok-4.5', models: ['grok-4.5', 'grok-4', 'grok-3', 'grok-3-mini'] },
+      },
+      paths: {
+        claude: CLAUDE_CLI_PATH,
+        codex: CODEX_CLI_PATH,
+        grok: GROK_CLI_PATH,
+      },
+    });
+  });
+
   app.get('/api/sessions', authMiddleware, async (req, res) => {
     try {
       const filterCwd = typeof req.query.cwd === 'string' ? req.query.cwd : null;
-      const sessions = await scanAllSessions(filterCwd || null);
-      res.json(sessions);
+      const agent = typeof req.query.agent === 'string' ? req.query.agent : null;
+      const sessions = await listSessions(filterCwd || null, agent);
+      res.json(sessions.map(toClientSession));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Project-centric listing: groups sessions by cwd with latest activity
+  app.get('/api/projects', authMiddleware, async (req, res) => {
+    try {
+      const agent = typeof req.query.agent === 'string' ? req.query.agent : null;
+      const days = parseInt(req.query.days || '0', 10) || 0;
+      let sessions = await listSessions(null, agent);
+      if (days > 0) {
+        const since = Date.now() - days * 86400000;
+        sessions = sessions.filter(s => (s.updatedAt || 0) >= since);
+      }
+      res.json(groupByProject(sessions.map(toClientSession)));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Recent activity + keyword search (metadata + light content peek)
+  // GET /api/activity?q=fix&days=7&agent=grok&limit=50&deep=1
+  app.get('/api/activity', authMiddleware, async (req, res) => {
+    try {
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      const agent = typeof req.query.agent === 'string' ? req.query.agent : null;
+      const days = parseInt(req.query.days || '14', 10) || 0;
+      const limit = Math.min(parseInt(req.query.limit || '60', 10) || 60, 200);
+      const deep = req.query.deep !== '0' && req.query.deep !== 'false';
+      const sessions = await listSessions(null, agent);
+      const results = await searchActivity(sessions, { q, days, agent, limit, deep });
+      res.json({
+        q,
+        days,
+        agent,
+        count: results.length,
+        results,
+      });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -590,11 +532,31 @@ export function createApp() {
   app.get('/api/sessions/:sessionId/messages', authMiddleware, async (req, res) => {
     try {
       const { sessionId } = req.params;
-      if (!/^[0-9a-f-]{36}$/.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
-      const filePath = await findSessionFile(sessionId);
-      if (!filePath) return res.status(404).json({ error: 'Session not found' });
-      const messages = await parseSessionMessages(filePath);
-      res.json(messages);
+      if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
+      const preferred = typeof req.query.agent === 'string' ? req.query.agent : null;
+      const opts = {
+        claudeConfigDirs: CLAUDE_CONFIG_DIRS,
+        codexHome: CODEX_HOME,
+        grokHome: GROK_HOME,
+      };
+      // Try preferred agent first, then fall back across all agents (stale cache / missing ?agent=)
+      const order = [...new Set([preferred, ...ENABLED_AGENTS, 'claude', 'codex', 'grok'].filter(Boolean))];
+      let bundle = null;
+      for (const a of order) {
+        bundle = await loadSessionMessages(sessionId, a, opts);
+        if (bundle) break;
+      }
+      if (!bundle) return res.status(404).json({ error: 'Session not found' });
+      // Normalize: always { messages, context, agent }
+      const payload = Array.isArray(bundle)
+        ? { messages: bundle, context: null, agent: preferred || 'claude' }
+        : {
+            messages: bundle.messages || [],
+            context: bundle.context || null,
+            agent: bundle.agent || preferred || 'claude',
+          };
+      res.setHeader('X-Session-Agent', payload.agent);
+      res.json(payload);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -603,11 +565,21 @@ export function createApp() {
   app.get('/api/sessions/:sessionId/memory', authMiddleware, async (req, res) => {
     try {
       const { sessionId } = req.params;
-      if (!/^[0-9a-f-]{36}$/.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
-      const filePath = await findSessionFile(sessionId);
-      if (!filePath) return res.status(404).json({ error: 'Session not found' });
-      const memory = await readProjectMemory(path.dirname(filePath));
-      res.json(memory);
+      if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
+      const preferred = typeof req.query.agent === 'string' ? req.query.agent : null;
+      const opts = {
+        claudeConfigDirs: CLAUDE_CONFIG_DIRS,
+        codexHome: CODEX_HOME,
+        grokHome: GROK_HOME,
+      };
+      const order = [...new Set([preferred, ...ENABLED_AGENTS, 'claude', 'codex', 'grok'].filter(Boolean))];
+      let memory = null;
+      for (const a of order) {
+        memory = await loadSessionMemory(sessionId, a, opts);
+        if (memory) break;
+      }
+      // Memory is Claude-centric; return empty instead of 404 so the tab doesn't hard-fail
+      res.json(memory || { index: null, files: [] });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -667,8 +639,9 @@ export function createApp() {
       try { msg = JSON.parse(raw.toString()); }
       catch { return; }
 
-      if (msg.type === 'claude-command') {
-        await runClaude(msg.command || '', msg.options || {}, send);
+      if (msg.type === 'claude-command' || msg.type === 'agent-command') {
+        const agent = msg.agent || msg.options?.agent || 'claude';
+        await dispatchAgent(agent, msg.command || '', msg.options || {}, send);
       } else if (msg.type === 'shell-command') {
         if (shellProc) { try { shellProc.kill(); } catch {} shellProc = null; }
         const cmd = msg.command || '';
@@ -737,107 +710,8 @@ export async function init() {
   await loadCreds();
   await bootstrapEnvUser();
   await syncConfigDirs();
+  console.log(`[agents] enabled: ${ENABLED_AGENTS.join(', ')}`);
+  console.log(`[agents] claude=${CLAUDE_CLI_PATH}  codex=${CODEX_CLI_PATH}  grok=${GROK_CLI_PATH}`);
 }
 
-// ─── Helpers used by routes (defined after their deps) ────────────────────────
-async function findSessionFile(sessionId) {
-  for (const configDir of CLAUDE_CONFIG_DIRS) {
-    const projectsDir = path.join(configDir, 'projects');
-    let projectDirs;
-    try { projectDirs = await fs.readdir(projectsDir); }
-    catch { continue; }
-    for (const dir of projectDirs) {
-      const candidate = path.join(projectsDir, dir, `${sessionId}.jsonl`);
-      try { await fs.access(candidate); return candidate; }
-      catch {}
-    }
-  }
-  return null;
-}
-
-// Read the persistent memory that lives alongside a session's project dir:
-//   <projectDir>/MEMORY.md         — the one-line-per-memory index
-//   <projectDir>/memory/*.md       — one fact per file
-async function readProjectMemory(projectDir) {
-  const memoryDir = path.join(projectDir, 'memory');
-  let index = null;
-  try { index = await fs.readFile(path.join(projectDir, 'MEMORY.md'), 'utf8'); }
-  catch {}
-
-  const files = [];
-  let entries = [];
-  try { entries = await fs.readdir(memoryDir, { withFileTypes: true }); }
-  catch {}
-  await Promise.all(
-    entries
-      .filter(e => e.isFile() && e.name.endsWith('.md'))
-      .map(async e => {
-        try {
-          const content = await fs.readFile(path.join(memoryDir, e.name), 'utf8');
-          const stat = await fs.stat(path.join(memoryDir, e.name));
-          files.push({ name: e.name, content, updatedAt: stat.mtimeMs });
-        } catch {}
-      })
-  );
-  files.sort((a, b) => a.name.localeCompare(b.name));
-  return { index, files };
-}
-
-const INTERNAL_PREFIXES = ['<command-', '<local-command', '<system-reminder', 'Caveat:', 'This session is being continued', '[Request interrupted'];
-
-function isInternal(text) {
-  return INTERNAL_PREFIXES.some(p => text.startsWith(p));
-}
-
-async function parseSessionMessages(filePath) {
-  const messages = [];
-  let pendingUsage = null;
-
-  function flushUsage() {
-    if (!pendingUsage) return;
-    const u = pendingUsage;
-    pendingUsage = null;
-    if (u.input_tokens || u.output_tokens) messages.push({ type: 'token_usage', usage: u });
-  }
-
-  try {
-    const stream = fsSync.createReadStream(filePath);
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    for await (const line of rl) {
-      let d;
-      try { d = JSON.parse(line); } catch { continue; }
-
-      if (d.type === 'user' && d.message?.content) {
-        flushUsage();
-        const content = d.message.content;
-        const parts = Array.isArray(content) ? content : [{ type: 'text', text: String(content) }];
-        for (const part of parts) {
-          if (part.type === 'text' && part.text?.trim() && !isInternal(part.text.trim())) {
-            messages.push({ role: 'user', type: 'text', content: part.text.trim(), ts: d.timestamp });
-          }
-        }
-        continue;
-      }
-
-      if (d.type === 'assistant' && Array.isArray(d.message?.content)) {
-        const u = d.message.usage;
-        if (u) {
-          if (!pendingUsage) pendingUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
-          pendingUsage.input_tokens               += u.input_tokens               ?? 0;
-          pendingUsage.output_tokens              += u.output_tokens              ?? 0;
-          pendingUsage.cache_creation_input_tokens+= u.cache_creation_input_tokens?? 0;
-          pendingUsage.cache_read_input_tokens    += u.cache_read_input_tokens    ?? 0;
-        }
-        for (const part of d.message.content) {
-          if (part.type === 'text' && part.text?.trim()) {
-            messages.push({ role: 'assistant', type: 'text', content: part.text.trim(), ts: d.timestamp });
-          } else if (part.type === 'tool_use') {
-            messages.push({ role: 'tool', type: 'tool_use', name: part.name, input: part.input ?? {}, ts: d.timestamp });
-          }
-        }
-      }
-    }
-    flushUsage();
-  } catch {}
-  return messages;
-}
+// (session helpers live in ./agents/sessions.js)

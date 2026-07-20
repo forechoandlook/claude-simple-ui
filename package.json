@@ -4,8 +4,9 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "start": "node server.js",
-    "dev": "NODE_ENV=development node --watch server.js"
+    "start": "NODE_ENV=production node server.js",
+    "dev": "NODE_ENV=development node --watch server.js",
+    "serve": "node server.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "*",
