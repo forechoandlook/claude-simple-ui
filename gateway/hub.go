@@ -97,6 +97,40 @@ func (g *gateway) handleAggregateSessions(w http.ResponseWriter, r *http.Request
 	if q != "" {
 		path += "?" + q
 	}
+
+	// Fast path: only one machine (X-Machine-Id or ?machine=) — used when UI already selected an edge
+	only := r.Header.Get("X-Machine-Id")
+	if only == "" {
+		only = r.URL.Query().Get("machine")
+	}
+	if only != "" {
+		// strip machine from query when forwarding
+		fwd := "/api/sessions"
+		vals := r.URL.Query()
+		vals.Del("machine")
+		if enc := vals.Encode(); enc != "" {
+			fwd += "?" + enc
+		}
+		res, err := g.forwardHTTP(only, http.MethodGet, fwd, g.edgeHeaders(), "")
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
+			return
+		}
+		var list []map[string]any
+		_ = json.Unmarshal([]byte(res.Body), &list)
+		for i := range list {
+			list[i]["machineId"] = only
+			if sid, _ := list[i]["sessionId"].(string); sid != "" {
+				list[i]["id"] = only + ":" + sid
+			}
+		}
+		if list == nil {
+			list = []map[string]any{}
+		}
+		writeJSON(w, list)
+		return
+	}
+
 	var merged []map[string]any
 	for _, item := range g.fanInGET(path) {
 		if item.Err != "" || item.Status >= 400 {

@@ -19,10 +19,15 @@ export async function api(method, path, body, signal, opts = {}) {
   };
 
   const p0 = path.split('?')[0];
-  const hubLocalGet = isHubLocalPath(path) && method === 'GET';
-  const needsMachine = hubMode.peek() && !hubLocalGet && machineId;
-  if (needsMachine) {
-    headers['X-Machine-Id'] = machineId;
+  // Prefer single-machine fan-out when we already know the edge (much faster)
+  const singleMachineList = hubMode.peek() && machineId && method === 'GET' && (
+    p0 === '/api/sessions' || p0 === '/api/projects' || p0 === '/api/workspaces'
+  );
+  const hubLocalGet = isHubLocalPath(path) && method === 'GET' && !singleMachineList;
+  const needsMachine = hubMode.peek() && (!hubLocalGet || singleMachineList) && machineId
+    && !(hubLocalGet && p0.startsWith('/api/auth'));
+  if (needsMachine || singleMachineList) {
+    if (machineId) headers['X-Machine-Id'] = machineId;
   }
   // session meta PUT must go to the selected machine
   if (hubMode.peek() && p0 === '/api/sessions/meta' && method !== 'GET' && machineId) {

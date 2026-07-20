@@ -9,7 +9,8 @@ import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort
          hubMode, machinesList, hubMachineReady, selectedMachineId, setSelectedMachine,
          AGENT_LABELS, AGENT_MODELS, AGENT_DEFAULT_MODEL, ctx } from './state.js';
 import { api, probeHub } from './api.js';
-import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from './cache.js';
+import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces,
+         getLastSessionContext, setLastSessionContext } from './cache.js';
 import { connectWS, clearMessages, appendMsg, appendSystemMsg, renderToolUse,
          appendHistoryTokenBar, appendContextBar, sendMessage, stopProcessing, attachImage,
          flushToolBatch, applyChatDensity, coerceTs } from './chat.js';
@@ -548,32 +549,54 @@ function updateRecentSessionsList(sessions) {
 }
 
 // ── Sessions + Workspaces ─────────────────────────────────────────────────────
-export async function loadAllSessions() {
-  // 1. Show cached data immediately if available
+/** @param {{ waitFresh?: boolean }} opts waitFresh=false → paint cache first, refresh in bg */
+export async function loadAllSessions({ waitFresh = true } = {}) {
   const cached = await getCachedSessions();
-  if (cached) sessionsData.value = cached;
+  if (cached) {
+    // Hub: if we already selected a machine, prefer cache entries for that machine
+    const mid = selectedMachineId.peek();
+    if (hubMode.peek() && mid && Array.isArray(cached)) {
+      const filtered = cached.filter(s => !s.machineId || s.machineId === mid);
+      sessionsData.value = filtered.length ? filtered : cached;
+    } else {
+      sessionsData.value = cached;
+    }
+  }
 
-  // 2. Fetch fresh data in background
-  try {
+  const fetchFresh = async () => {
     const fresh = await api('GET', '/api/sessions');
     sessionsData.value = fresh;
     setCachedSessions(fresh);
-  } catch (e) {
-    if (!cached) {
-      const el = $('session-list');
-      if (el) el.innerHTML = `<div class="px-3 py-3 text-xs text-error">${esc(e.message)}</div>`;
+    return fresh;
+  };
+
+  if (waitFresh || !cached) {
+    try {
+      await fetchFresh();
+    } catch (e) {
+      if (!cached) {
+        const el = $('session-list');
+        if (el) el.innerHTML = `<div class="px-3 py-3 text-xs text-error">${esc(e.message)}</div>`;
+      }
     }
+  } else {
+    fetchFresh().catch(() => {});
   }
 }
 
-async function loadWorkspaces() {
+async function loadWorkspaces({ waitFresh = true } = {}) {
   const cached = await getCachedWorkspaces();
   if (cached) workspacesData.value = cached;
-  try {
+  const fetchFresh = async () => {
     const fresh = await api('GET', '/api/workspaces');
     workspacesData.value = fresh;
     setCachedWorkspaces(fresh);
-  } catch {}
+  };
+  if (waitFresh || !cached) {
+    try { await fetchFresh(); } catch {}
+  } else {
+    fetchFresh().catch(() => {});
+  }
 }
 
 function formatTime(ts) {
@@ -925,108 +948,152 @@ export function goHome() {
   setHash('/');
 }
 
-export async function resumeSession(sid, cwd, configDir, agent, machineId) {
+/**
+ * @param {string} sid
+ * @param {string|null} cwd
+ * @param {string|null} configDir
+ * @param {string|null} agent
+ * @param {string|null} machineId
+ * @param {{ tab?: string, skipHistory?: boolean }} [opts]
+ */
+export async function resumeSession(sid, cwd, configDir, agent, machineId, opts = {}) {
+  const targetTab = opts.tab && ['chat', 'files', 'git', 'shell', 'memory'].includes(opts.tab)
+    ? opts.tab
+    : 'chat';
+  // Non-chat deep links: open tab immediately; don't block on chat history
+  const skipHistory = opts.skipHistory ?? (targetTab !== 'chat' && targetTab !== 'memory');
+
   const fromList = sessionsData.peek().find(s =>
     s.sessionId === sid && (!machineId || s.machineId === machineId || !s.machineId)
   );
-  const resolvedAgent = agent || fromList?.agent || 'claude';
-  // Prefer explicit machine, then session meta, then currently selected hub machine
-  const resolvedMachine = machineId || fromList?.machineId || selectedMachineId.peek() || null;
+  const last = getLastSessionContext();
+  const fromLast = last?.sessionId === sid ? last : null;
 
-  if (hubMode.peek() && resolvedMachine && resolvedMachine !== selectedMachineId.peek()) {
-    setSelectedMachine(resolvedMachine);
-    try { ctx.ws?.close(); } catch {}
-    ctx.ws = null;
-  } else if (resolvedMachine && resolvedMachine !== ctx.machineId) {
+  const resolvedAgent = agent || fromList?.agent || fromLast?.agent || 'claude';
+  const resolvedMachine = machineId || fromList?.machineId || fromLast?.machineId
+    || selectedMachineId.peek() || null;
+  const resolvedCwd = cwd || fromList?.cwd || fromLast?.cwd || null;
+  const resolvedConfig = configDir || fromList?.configDir || fromLast?.configDir || null;
+
+  if (resolvedMachine && resolvedMachine !== ctx.machineId) {
     setSelectedMachine(resolvedMachine);
     try { ctx.ws?.close(); } catch {}
     ctx.ws = null;
   }
 
   ctx.sessionId = sid;
-  ctx.configDir = configDir || null;
+  ctx.configDir = resolvedConfig;
   ctx.agent = resolvedAgent;
   setAgent(resolvedAgent);
   refreshModelSelect();
 
-  const topLabel = resolvedMachine ? `${cwd || sid}  @${resolvedMachine}` : (cwd || sid);
+  const topLabel = resolvedMachine
+    ? `${resolvedCwd || sid}  @${resolvedMachine}`
+    : (resolvedCwd || sid);
 
-  if (cwd && cwd !== currentProject.peek()?.path) {
-    const name = cwd.split('/').filter(Boolean).pop() || cwd;
+  if (resolvedCwd && resolvedCwd !== currentProject.peek()?.path) {
+    const name = resolvedCwd.split('/').filter(Boolean).pop() || resolvedCwd;
     batch(() => {
-      currentProject.value = { id: name, name, path: cwd, machineId: resolvedMachine };
-      sessionFilter.value = cwd;
+      currentProject.value = { id: name, name, path: resolvedCwd, machineId: resolvedMachine };
+      sessionFilter.value = resolvedCwd;
       filesRoot.value = '';
       gitRoot.value = '';
       filesPath.value = '';
       viewingFile.value = null;
     });
     $('topbar-project').textContent = topLabel;
-    // Pre-fill root inputs with session cwd so user can see/edit the path
-    const fi = $('files-root-input'); if (fi) fi.value = cwd;
-    const gi = $('git-root-input');   if (gi) gi.value = cwd;
+    const fi = $('files-root-input'); if (fi) fi.value = resolvedCwd;
+    const gi = $('git-root-input');   if (gi) gi.value = resolvedCwd;
     const pv = $('project-view');
     pv.classList.remove('hidden');
     pv.style.display = 'flex';
     $('welcome').classList.add('hidden');
     connectWS();
-  } else if (!currentProject.peek() && cwd) {
-    const name = cwd.split('/').filter(Boolean).pop() || cwd;
+  } else if (!currentProject.peek() && resolvedCwd) {
+    const name = resolvedCwd.split('/').filter(Boolean).pop() || resolvedCwd;
     batch(() => {
-      currentProject.value = { id: name, name, path: cwd, machineId: resolvedMachine };
-      sessionFilter.value = cwd;
+      currentProject.value = { id: name, name, path: resolvedCwd, machineId: resolvedMachine };
+      sessionFilter.value = resolvedCwd;
       filesRoot.value = '';
       gitRoot.value = '';
       filesPath.value = '';
       viewingFile.value = null;
     });
     $('topbar-project').textContent = topLabel;
-    const fi = $('files-root-input'); if (fi) fi.value = cwd;
-    const gi = $('git-root-input');   if (gi) gi.value = cwd;
+    const fi = $('files-root-input'); if (fi) fi.value = resolvedCwd;
+    const gi = $('git-root-input');   if (gi) gi.value = resolvedCwd;
     $('welcome').classList.add('hidden');
     const pv = $('project-view');
     pv.classList.remove('hidden');
     pv.style.display = 'flex';
     connectWS();
+  } else if (!resolvedCwd) {
+    // Still open project shell so files tab can show path input
+    $('welcome')?.classList.add('hidden');
+    const pv = $('project-view');
+    if (pv) { pv.classList.remove('hidden'); pv.style.display = 'flex'; }
   }
+
+  // Switch to target tab BEFORE history (files/git/shell usable immediately)
   clearMessages();
-  switchTab('chat');
+  switchTab(targetTab);
   sessionsData.value = [...sessionsData.peek()];
 
+  setLastSessionContext({
+    sessionId: sid,
+    cwd: resolvedCwd,
+    configDir: resolvedConfig,
+    agent: resolvedAgent,
+    machineId: resolvedMachine,
+    tab: targetTab,
+  });
+
   const label = AGENT_LABELS[resolvedAgent] || resolvedAgent;
-  appendSystemMsg(`Loading ${label} history…`);
-  try {
-    const q = new URLSearchParams({ agent: resolvedAgent });
-    const data = await api('GET', `/api/sessions/${sid}/messages?${q}`);
-    // Support both legacy array and { messages, context }
-    const msgs = Array.isArray(data) ? data : (data.messages || []);
-    const context = Array.isArray(data) ? null : (data.context || null);
-    $('messages').innerHTML = '';
-    if (!msgs.length) {
-      appendSystemMsg(`${label} · ${sid.slice(0,8)}… — no history`);
-    } else {
-      flushToolBatch();
-      for (const m of msgs) {
-        const ts = coerceTs(m.ts ?? m.timestamp);
-        if (m.type === 'text') {
-          if (m.role === 'assistant' || m.role === 'user') flushToolBatch();
-          appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : label, m.content, { ts });
-        } else if (m.type === 'tool_use') {
-          renderToolUse({ name: m.name, input: m.input ?? {} }, { ts });
-        } else if (m.type === 'token_usage') {
-          flushToolBatch();
-          appendHistoryTokenBar(m.usage);
+
+  const loadHistory = async () => {
+    appendSystemMsg(`Loading ${label} history…`);
+    try {
+      const q = new URLSearchParams({ agent: resolvedAgent });
+      const data = await api('GET', `/api/sessions/${sid}/messages?${q}`);
+      const msgs = Array.isArray(data) ? data : (data.messages || []);
+      const context = Array.isArray(data) ? null : (data.context || null);
+      // If user already navigated away from this session, skip paint
+      if (ctx.sessionId !== sid) return;
+      $('messages').innerHTML = '';
+      if (!msgs.length) {
+        appendSystemMsg(`${label} · ${sid.slice(0, 8)}… — no history`);
+      } else {
+        flushToolBatch();
+        for (const m of msgs) {
+          const ts = coerceTs(m.ts ?? m.timestamp);
+          if (m.type === 'text') {
+            if (m.role === 'assistant' || m.role === 'user') flushToolBatch();
+            appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : label, m.content, { ts });
+          } else if (m.type === 'tool_use') {
+            renderToolUse({ name: m.name, input: m.input ?? {} }, { ts });
+          } else if (m.type === 'token_usage') {
+            flushToolBatch();
+            appendHistoryTokenBar(m.usage);
+          }
         }
+        flushToolBatch();
+        if (context) appendContextBar(context);
+        const turnCount = msgs.filter(m => m.type === 'token_usage').length
+          || msgs.filter(m => m.role === 'user').length;
+        appendSystemMsg(`── ${label} history · ${turnCount} turn${turnCount !== 1 ? 's' : ''} ──`);
       }
-      flushToolBatch();
-      if (context) appendContextBar(context);
-      const turnCount = msgs.filter(m => m.type === 'token_usage').length
-        || msgs.filter(m => m.role === 'user').length;
-      appendSystemMsg(`── ${label} history · ${turnCount} turn${turnCount !== 1 ? 's' : ''} ──`);
+    } catch (e) {
+      if (ctx.sessionId !== sid) return;
+      $('messages').innerHTML = '';
+      appendSystemMsg(`${label} · ${sid.slice(0, 8)}… (history unavailable: ${e.message})`);
     }
-  } catch (e) {
-    $('messages').innerHTML = '';
-    appendSystemMsg(`${label} · ${sid.slice(0,8)}… (history unavailable: ${e.message})`);
+  };
+
+  if (skipHistory) {
+    // Background: history ready when user opens Chat
+    loadHistory().catch(() => {});
+  } else {
+    await loadHistory();
   }
   syncHash();
   renderSessionNotesBar();
@@ -1382,59 +1449,135 @@ async function enterMachine(machineId, { forceReload = false } = {}) {
   hubMachineReady.value = true;
 }
 
-export async function showApp() {
+/**
+ * @param {{ hub?: object|false, deepLink?: { id: string, tab?: string }|null }} [opts]
+ */
+export async function showApp(opts = {}) {
   $('auth-screen').style.display = 'none';
   const app = $('app');
   app.classList.remove('hidden');
   app.style.display = 'flex';
 
-  if (location.hash.startsWith('#/session/') && !hubMode.peek()) {
-    const welcome = $('welcome');
-    if (welcome) welcome.classList.add('hidden');
-    const pv = $('project-view');
-    if (pv) {
-      pv.classList.remove('hidden');
-      pv.style.display = 'flex';
-    }
+  // Use probe result from boot when provided (avoid second /api/hub round-trip)
+  let hub = opts.hub;
+  if (hub === undefined) {
+    hub = await probeHub();
+  } else if (hub) {
+    hubMode.value = true;
+    if (hub.machines) machinesList.value = hub.machines;
+  } else {
+    hubMode.value = false;
   }
 
-  // Detect unified hub (public WebUI + many edges)
-  const hub = await probeHub();
-  if (hub) {
-    machinesList.value = hub.machines || [];
+  const deep = opts.deepLink || null;
+  const last = getLastSessionContext();
+
+  // Hide welcome early when restoring a session URL
+  if (deep?.id || location.hash.startsWith('#/session/')) {
+    $('welcome')?.classList.add('hidden');
+    const pv = $('project-view');
+    if (pv) { pv.classList.remove('hidden'); pv.style.display = 'flex'; }
   }
 
   if (hubMode.peek()) {
-    await refreshMachinesList();
-    const ms = machinesList.peek() || [];
-    const remembered = localStorage.getItem('machineId') || '';
-    const rememberedOnline = remembered && ms.some(m => m.id === remembered && m.online !== false);
-
-    if (rememberedOnline) {
-      // Restore last machine — no full-screen picker
+    const remembered = localStorage.getItem('machineId') || last?.machineId || '';
+    // Optimistic: use remembered machine immediately (don't wait for machines list)
+    if (remembered) {
       setSelectedMachine(remembered);
       hideMachinePicker();
-      syncTopbarMachine();
-      startMachinePolling();
-      await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
       hubMachineReady.value = true;
-      const bar = $('topbar-project');
-      if (bar && bar.textContent === 'Select a session') {
-        bar.textContent = `Machine · ${remembered}`;
+    }
+
+    // Machines list: refresh in background; only block picker if no remembered id
+    const machinesP = refreshMachinesList().then(ms => {
+      syncTopbarMachine();
+      if (!remembered) return ms;
+      const online = ms.some(m => m.id === remembered && m.online !== false);
+      if (!online && ms.length) {
+        // remembered offline — user can switch from menu; keep selection unless gone entirely
+        const exists = ms.some(m => m.id === remembered);
+        if (!exists) {
+          setSelectedMachine(null);
+          showMachinePicker();
+        }
       }
+      return ms;
+    });
+
+    startMachinePolling();
+    syncTopbarMachine();
+
+    // Sessions/workspaces: paint cache fast, refresh bg — don't block deep-link
+    const dataP = Promise.all([
+      loadAllSessions({ waitFresh: false }),
+      loadWorkspaces({ waitFresh: false }),
+      loadSessionMetaMap().catch(() => {}),
+    ]);
+
+    // Deep-link ASAP using lastSessionContext / list cache
+    if (deep?.id) {
+      const s = sessionsData.peek().find(x => x.sessionId === deep.id)
+        || (last?.sessionId === deep.id ? last : null);
+      await resumeSession(
+        deep.id,
+        s?.cwd || last?.cwd || null,
+        s?.configDir || last?.configDir || null,
+        s?.agent || last?.agent || null,
+        s?.machineId || last?.machineId || remembered || null,
+        { tab: deep.tab || 'chat' },
+      );
+      // ensure machines eventually known
+      machinesP.catch(() => {});
+      dataP.catch(() => {});
       return;
     }
 
-    // First time or remembered machine offline → full picker
-    setSelectedMachine(null);
-    showMachinePicker();
-    loadSessionMetaMap().catch(() => {});
-    syncTopbarMachine();
-    startMachinePolling();
+    if (!remembered) {
+      await machinesP;
+      const ms = machinesList.peek() || [];
+      if (!ms.length) {
+        showMachinePicker();
+        dataP.catch(() => {});
+        return;
+      }
+      showMachinePicker();
+      dataP.catch(() => {});
+      return;
+    }
+
+    await dataP;
+    const bar = $('topbar-project');
+    if (bar && bar.textContent === 'Select a session') {
+      bar.textContent = `Machine · ${remembered}`;
+    }
     return;
   }
 
-  await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
+  // Standalone: cache-first sessions, then deep link
+  const dataP = Promise.all([
+    loadAllSessions({ waitFresh: false }),
+    loadWorkspaces({ waitFresh: false }),
+    loadSessionMetaMap().catch(() => {}),
+  ]);
+
+  if (deep?.id) {
+    // Apply cache if any, then resume without waiting for network sessions
+    await getCachedSessions().then(c => { if (c) sessionsData.value = c; }).catch(() => {});
+    const s = sessionsData.peek().find(x => x.sessionId === deep.id)
+      || (last?.sessionId === deep.id ? last : null);
+    await resumeSession(
+      deep.id,
+      s?.cwd || last?.cwd || null,
+      s?.configDir || last?.configDir || null,
+      s?.agent || last?.agent || null,
+      null,
+      { tab: deep.tab || 'chat' },
+    );
+    dataP.catch(() => {});
+    return;
+  }
+
+  await dataP;
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -1729,9 +1872,16 @@ export function initShell() {
 
   // 7. Router: deep-link to a session by id
   document.addEventListener('router:session', async ({ detail: { id, tab } }) => {
-    const s = sessionsData.peek().find(s => s.sessionId === id);
-    await resumeSession(id, s?.cwd || null, s?.configDir || null, s?.agent || null);
-    if (tab && ['chat','files','git','shell','memory'].includes(tab)) switchTab(tab);
+    const s = sessionsData.peek().find(x => x.sessionId === id);
+    const last = getLastSessionContext();
+    await resumeSession(
+      id,
+      s?.cwd || (last?.sessionId === id ? last.cwd : null) || null,
+      s?.configDir || (last?.sessionId === id ? last.configDir : null) || null,
+      s?.agent || (last?.sessionId === id ? last.agent : null) || null,
+      s?.machineId || (last?.sessionId === id ? last.machineId : null) || null,
+      { tab: tab || 'chat' },
+    );
   });
 
   // 7. Event delegation

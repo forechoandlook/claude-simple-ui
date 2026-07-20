@@ -30,19 +30,26 @@ export function initRouter(resumeSession, switchTab) {
   });
 }
 
-// Called by app.js AFTER showApp() + sessions loaded — applies the initial URL hash
+/** Parse `#/session/:id/:tab?` → { id, tab } or null */
+export function parseHashPath(path) {
+  const m = (path || '').match(/^\/session\/([^/]+)(?:\/([^/]+))?$/);
+  if (!m) return null;
+  return { id: m[1], tab: m[2] || null };
+}
+
+// Called by app.js when hash is not already handled by showApp deep-link
 export function applyInitialRoute() {
   applyHash(location.hash.slice(1) || '/');
 }
 
 function applyHash(path) {
   // /session/:id  or  /session/:id/:tab
-  const m = path.match(/^\/session\/([^/]+)(?:\/([^/]+))?$/);
-  if (!m) {
+  const parsed = parseHashPath(path);
+  if (!parsed) {
     document.dispatchEvent(new CustomEvent('router:home'));
     return;
   }
-  const [, id, tab] = m;
+  const { id, tab } = parsed;
   if (!_resumeSession || !_switchTab) return;
 
   if (id !== ctx.sessionId) {

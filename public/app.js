@@ -8,7 +8,7 @@ import { initGitTab } from './git.js';
 import { initSettings } from './settings.js';
 import { initTerminal } from './terminal.js';
 import { initImagePaste } from './chat.js';
-import { initRouter, applyInitialRoute } from './router.js';
+import { initRouter, applyInitialRoute, parseHashPath } from './router.js';
 
 // 1. Render HTML shell (creates all DOM elements)
 initShell();
@@ -22,14 +22,19 @@ initTerminal();
 initImagePaste();
 initRouter(resumeSession, switchTab);
 
-// 3. Boot: probe hub mode, then resume session or show auth
+// 3. Boot — parallel hub probe; deep-link restored inside showApp (not after full session list)
 (async () => {
-  await probeHub();
+  const deepLink = parseHashPath(location.hash.slice(1) || '/');
+  const hubPromise = probeHub();
+
   if (ctx.token) {
     try {
-      await showApp();           // loads sessions into state
-      applyInitialRoute();       // now safe to restore URL hash
-    } catch {
+      const hub = await hubPromise;
+      await showApp({ hub, deepLink });
+      // Only apply hash if showApp didn't already handle a deep session link
+      if (!deepLink?.id) applyInitialRoute();
+    } catch (e) {
+      console.error('[boot]', e);
       ctx.token = null;
       localStorage.removeItem('token');
       await initAuth();
