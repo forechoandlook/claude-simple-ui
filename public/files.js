@@ -9,7 +9,7 @@ function fileIcon(name) {
   return {
     js: '📄', ts: '📄', jsx: '📄', tsx: '📄', py: '🐍', md: '📝', json: '⚙️',
     html: '🌐', css: '🎨', sh: '⚡', env: '🔑',
-    docx: '📘', pptx: '📙', xlsx: '📗',
+    docx: '📘', pptx: '📙', xlsx: '📗', pdf: '📕',
   }[ext] || '📄';
 }
 
@@ -21,7 +21,7 @@ function extOf(path) {
 
 function officeKind(path) {
   const e = extOf(path);
-  return e === 'docx' || e === 'pptx' || e === 'xlsx' ? e : null;
+  return e === 'docx' || e === 'pptx' || e === 'xlsx' || e === 'pdf' ? e : null;
 }
 
 function sizeLabel(size) {
@@ -237,14 +237,58 @@ async function renderPptx(arrayBuffer) {
     </div>`;
 }
 
+async function ensurePdfJs() {
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+  if (typeof pdfjsLib === 'undefined') throw new Error('pdf.js failed to load');
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  return pdfjsLib;
+}
+
+async function renderPdf(arrayBuffer) {
+  const pdfjs = await ensurePdfJs();
+  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const total = pdf.numPages;
+  const maxPages = Math.min(total, 40); // cap for memory / UX
+  const pagesHtml = [];
+  for (let i = 1; i <= maxPages; i++) {
+    const page = await pdf.getPage(i);
+    const baseViewport = page.getViewport({ scale: 1 });
+    // Fit ~820px wide (readable on sidebar layout)
+    const scale = Math.min(1.5, 820 / baseViewport.width);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    canvas.className = 'office-pdf-page';
+    canvas.dataset.page = String(i);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    pagesHtml.push(`
+      <figure class="office-pdf-figure">
+        <figcaption class="office-pdf-cap">Page ${i} / ${total}</figcaption>
+        ${canvas.outerHTML}
+      </figure>`);
+  }
+  const more = total > maxPages
+    ? `<p class="text-xs text-base-content/50 px-2">Showing first ${maxPages} of ${total} pages — download for full file.</p>`
+    : '';
+  return `
+    <div class="office-preview office-pdf overflow-auto flex-1 p-3 space-y-3">
+      <p class="text-xs text-base-content/50 px-1">PDF preview · ${total} page(s)</p>
+      ${more}
+      ${pagesHtml.join('')}
+    </div>`;
+}
+
 async function renderOfficeFile(path, base64, size) {
   const kind = officeKind(path);
-  const labels = { docx: 'Word', pptx: 'PowerPoint', xlsx: 'Excel' };
+  const labels = { docx: 'Word', pptx: 'PowerPoint', xlsx: 'Excel', pdf: 'PDF' };
   const ab = base64ToArrayBuffer(base64);
   let body;
   if (kind === 'docx') body = await renderDocx(ab);
   else if (kind === 'xlsx') body = await renderXlsx(ab);
   else if (kind === 'pptx') body = await renderPptx(ab);
+  else if (kind === 'pdf') body = await renderPdf(ab);
   else throw new Error('Unsupported office type');
   return fileChrome(path, size, labels[kind] || kind) + body;
 }

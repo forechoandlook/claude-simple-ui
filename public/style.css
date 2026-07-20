@@ -485,6 +485,28 @@
 }
 .office-slide-body p { margin: 0.35em 0; }
 
+.office-pdf-figure {
+  margin: 0 auto;
+  max-width: 100%;
+  text-align: center;
+}
+.office-pdf-cap {
+  font-size: 10px;
+  color: color-mix(in oklch, var(--color-base-content) 45%, transparent);
+  margin-bottom: 0.35rem;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.office-pdf-page {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
+  box-shadow: 0 4px 18px color-mix(in oklch, black 18%, transparent);
+  background: white;
+}
+
 /* Blockquote */
 .md blockquote {
   margin: 0.75em 0;

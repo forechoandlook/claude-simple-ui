@@ -376,8 +376,8 @@ export function createApp() {
         res.setHeader('Content-Type', 'application/octet-stream');
         return fsSync.createReadStream(filePath).pipe(res);
       }
-      // Office / binary previews need more headroom than plain text
-      const isOffice = /\.(docx|pptx|xlsx)$/i.test(rel);
+      // Office / PDF / binary previews need more headroom than plain text
+      const isOffice = /\.(docx|pptx|xlsx|pdf)$/i.test(rel);
       const maxBytes = isOffice ? 15 * 1024 * 1024 : 2 * 1024 * 1024;
       if (stat.size > maxBytes) {
         return res.status(413).json({
