@@ -38,7 +38,10 @@ export function applyInitialRoute() {
 function applyHash(path) {
   // /session/:id  or  /session/:id/:tab
   const m = path.match(/^\/session\/([^/]+)(?:\/([^/]+))?$/);
-  if (!m) return;
+  if (!m) {
+    document.dispatchEvent(new CustomEvent('router:home'));
+    return;
+  }
   const [, id, tab] = m;
   if (!_resumeSession || !_switchTab) return;
 

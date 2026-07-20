@@ -26,7 +26,6 @@ initRouter(resumeSession, switchTab);
 (async () => {
   if (ctx.token) {
     try {
-      await api('GET', '/api/sessions');
       await showApp();           // loads sessions into state
       applyInitialRoute();       // now safe to restore URL hash
     } catch {

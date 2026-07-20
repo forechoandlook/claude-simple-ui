@@ -1,7 +1,7 @@
 // shell.js — HTML templates, layout bootstrap, sidebar, tabs, auth, modals
 import { watch, effect, batch, computed, delegate, esc, $ } from './lib.js';
 import { sessionsData, workspacesData, sessionFilter, sessionSearch, sessionSort,
-         expandedFolders, filteredSessions, projectGroups, currentProject, currentTab, filesRoot, gitRoot,
+         expandedFolders, collapsedFolders, filesPath, viewingFile, filteredSessions, projectGroups, currentProject, currentTab, filesRoot, gitRoot,
          currentModel, currentEffort, currentPermission, currentAgent, setAgent,
          sidebarView, agentFilter, timeRange, activityHits, activityLoading,
          chatDensity, setChatDensity,
@@ -16,7 +16,7 @@ import { initSettings, openSettings } from './settings.js';
 
 // ── HTML Templates ────────────────────────────────────────────────────────────
 const AuthScreen = () => `
-  <div id="auth-screen" class="flex items-center justify-center h-full p-4">
+  <div id="auth-screen" class="${ctx.token ? 'hidden' : ''} flex items-center justify-center h-full p-4" ${ctx.token ? 'style="display:none"' : ''}>
     <div class="card bg-base-200 border border-base-300 w-full max-w-sm shadow-xl">
       <div class="card-body gap-3 p-8">
         <h1 class="text-xl font-bold">🤖 Agent UI</h1>
@@ -37,10 +37,10 @@ const AuthScreen = () => `
 
 const AppShell = () => `
   <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-[9]"></div>
-  <div id="app" class="hidden flex-col flex-1 overflow-hidden">
+  <div id="app" class="${ctx.token ? '' : 'hidden'} flex-col flex-1 overflow-hidden" ${ctx.token ? 'style="display:flex"' : 'style="display:none"'}>
     <div class="flex items-center gap-2 px-3 bg-base-200 border-b border-base-300 flex-shrink-0" style="height:44px">
       <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
-      <span class="font-semibold text-sm hidden sm:inline">🤖 Agent UI</span>
+      <span id="btn-home" class="font-semibold text-sm hidden sm:inline cursor-pointer hover:text-primary transition-colors select-none">🤖 Agent UI</span>
       <span class="text-base-300 hidden sm:inline">/</span>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
       <div class="flex gap-2">
@@ -93,10 +93,70 @@ const AppShell = () => `
           style="left:0;top:50%;transform:translateY(-50%)">◀</button>
       </div>
       <div id="main" class="flex-1 flex flex-col overflow-hidden min-w-0">
-        <div id="welcome" class="flex-1 flex flex-col items-center justify-center gap-3 text-base-content/50 p-6 text-center">
-          <h2 class="text-lg font-semibold text-base-content">Welcome</h2>
-          <p class="text-sm">Claude · Codex · Grok — select a session or start a new one</p>
-          <button id="btn-new-session-welcome" class="btn btn-primary btn-sm mt-2">＋ New Session</button>
+        <div id="welcome" class="flex-1 flex flex-col items-center justify-start overflow-y-auto p-4 md:p-6 gap-5">
+          <div class="max-w-4xl w-full text-center flex flex-col items-center gap-2 mt-2 md:mt-4">
+            <h2 class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent select-none">🤖 Agent UI</h2>
+            <p class="text-sm text-base-content/65 max-w-md">Claude · Codex · Grok — Select a session from the sidebar or click a day on the calendar to view activity.</p>
+            <button id="btn-new-session-welcome" class="btn btn-primary btn-sm mt-0.5 shadow-md">＋ New Session</button>
+          </div>
+          
+          <!-- Stats Banner -->
+          <div class="max-w-4xl w-full grid grid-cols-2 md:grid-cols-4 gap-4 text-center select-none mt-1">
+            <div class="bg-base-200 border border-base-300 rounded-2xl p-3 shadow-md flex flex-col justify-center items-center">
+              <span class="text-[10px] uppercase tracking-wider text-base-content/40 font-bold">Total Sessions</span>
+              <span id="stats-total-sessions" class="text-xl md:text-2xl font-extrabold text-primary mt-0.5">0</span>
+            </div>
+            <div class="bg-base-200 border border-base-300 rounded-2xl p-3 shadow-md flex flex-col justify-center items-center">
+              <span class="text-[10px] uppercase tracking-wider text-base-content/40 font-bold">Active Projects</span>
+              <span id="stats-total-projects" class="text-xl md:text-2xl font-extrabold text-accent mt-0.5">0</span>
+            </div>
+            <div class="bg-base-200 border border-base-300 rounded-2xl p-3 shadow-md flex flex-col justify-center items-center">
+              <span class="text-[10px] uppercase tracking-wider text-base-content/40 font-bold">Total Tokens</span>
+              <span id="stats-total-tokens" class="text-xl md:text-2xl font-extrabold text-secondary mt-0.5">0</span>
+            </div>
+            <div class="bg-base-200 border border-base-300 rounded-2xl p-3 shadow-md flex flex-col justify-center items-center">
+              <span class="text-[10px] uppercase tracking-wider text-base-content/40 font-bold">Selected Day Tokens</span>
+              <span id="stats-selected-tokens" class="text-xl md:text-2xl font-extrabold text-success mt-0.5">0</span>
+            </div>
+          </div>
+          <div class="max-w-4xl w-full grid grid-cols-1 md:grid-cols-12 gap-5 items-start text-left">
+            <!-- Calendar Card -->
+            <div class="card bg-base-200 border border-base-300 md:col-span-7 shadow-xl">
+              <div class="card-body p-4">
+                <div class="flex items-center justify-between mb-3">
+                  <button id="btn-cal-prev" class="btn btn-ghost btn-sm text-base font-bold">◀</button>
+                  <h3 id="calendar-month-year" class="text-base font-extrabold text-base-content select-none"></h3>
+                  <button id="btn-cal-next" class="btn btn-ghost btn-sm text-base font-bold">▶</button>
+                </div>
+                
+                <div class="grid grid-cols-7 gap-2 text-center text-[10px] font-bold text-base-content/40 mb-1">
+                  <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+                </div>
+                
+                <div id="calendar-grid" class="grid grid-cols-7 gap-2">
+                  <!-- JS Rendered -->
+                </div>
+              </div>
+            </div>
+            
+            <!-- Details Card -->
+            <div class="card bg-base-200 border border-base-300 md:col-span-5 shadow-xl min-h-[290px] flex flex-col">
+              <div class="card-body p-4 flex flex-col flex-1">
+                <h3 id="selected-day-title" class="card-title text-xs font-bold uppercase tracking-wider text-base-content/50 mb-3 select-none">Daily Activity</h3>
+                <div id="selected-day-sessions" class="flex-1 overflow-y-auto flex flex-col gap-2 max-h-[250px]">
+                  <div class="text-center text-xs text-base-content/40 my-auto py-6">Select a date on the calendar to view its sessions.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recent Sessions Section -->
+          <div class="max-w-4xl w-full border-t border-base-300/60 pt-4 mt-1 text-left">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-base-content/50 mb-3 select-none">Recent Workspaces & Sessions</h3>
+            <div id="recent-sessions-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              <!-- JS Rendered -->
+            </div>
+          </div>
         </div>
         <div id="project-view" class="hidden flex-col flex-1 overflow-hidden">
           <div class="flex bg-base-200 border-b border-base-300 flex-shrink-0 overflow-x-auto" style="scrollbar-width:none">
@@ -170,16 +230,9 @@ const AppShell = () => `
           <div id="tab-shell" class="hidden flex-col flex-1 overflow-hidden bg-[#0d1117]">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 bg-base-200 flex-shrink-0">
               <span class="text-xs text-base-content/40 font-mono flex-1" id="term-cwd"></span>
-              <button id="term-clear"     class="btn btn-ghost btn-xs text-xs text-base-content/40">Clear</button>
               <button id="term-reconnect" class="btn btn-ghost btn-xs text-xs text-base-content/40">Reconnect</button>
             </div>
-            <div id="term-output" class="flex-1 overflow-y-auto p-3 font-mono text-xs text-[#c9d1d9] whitespace-pre-wrap break-all cursor-text leading-relaxed"></div>
-            <div class="flex items-center gap-2 px-3 py-2 border-t border-base-300 bg-base-200 flex-shrink-0">
-              <span class="text-[#4e9a06] font-mono text-xs select-none">$</span>
-              <input id="term-input" type="text" autocomplete="off" spellcheck="false"
-                class="flex-1 bg-transparent font-mono text-xs text-[#c9d1d9] outline-none border-0"
-                placeholder="type a command…">
-            </div>
+            <div id="terminal-container" class="flex-1 p-2 overflow-hidden"></div>
           </div>
           <div id="tab-git" class="hidden flex-col flex-1 overflow-hidden">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
@@ -232,6 +285,222 @@ const AppShell = () => `
     </div>
     <form method="dialog" class="modal-backdrop"><button>close</button></form>
   </dialog>`;
+
+let calYear = new Date().getFullYear();
+let calMonth = new Date().getMonth(); // 0-11
+let selectedCalDate = null;
+
+function getLocalDateString(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getMonthGrid(year, month) {
+  const cells = [];
+  const firstDay = new Date(year, month, 1);
+  const startDay = firstDay.getDay();
+  const lastDay = new Date(year, month + 1, 0);
+  const totalDays = lastDay.getDate();
+  const prevLastDay = new Date(year, month, 0).getDate();
+  
+  for (let i = startDay - 1; i >= 0; i--) {
+    cells.push({
+      date: new Date(year, month - 1, prevLastDay - i),
+      isCurrentMonth: false
+    });
+  }
+  
+  for (let i = 1; i <= totalDays; i++) {
+    cells.push({
+      date: new Date(year, month, i),
+      isCurrentMonth: true
+    });
+  }
+  
+  const remaining = 7 - (cells.length % 7);
+  if (remaining < 7) {
+    for (let i = 1; i <= remaining; i++) {
+      cells.push({
+        date: new Date(year, month + 1, i),
+        isCurrentMonth: false
+      });
+    }
+  }
+  
+  return cells;
+}
+
+function getSessionsForDate(date, sessions) {
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const end = start + 24 * 60 * 60 * 1000;
+  return sessions.filter(s => {
+    const ts = coerceTs(s.updatedAt);
+    return ts >= start && ts < end;
+  });
+}
+
+function formatTokenCount(n) {
+  if (n == null || isNaN(n)) return '0';
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
+
+function updateDashboard(sessions) {
+  const grid = $('calendar-grid');
+  if (!grid) return;
+
+  const header = $('calendar-month-year');
+  if (header) {
+    const dummyDate = new Date(calYear, calMonth, 1);
+    header.textContent = dummyDate.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  }
+
+  // Calculate total sessions, unique projects, and total tokens
+  const totalSessions = sessions.length;
+  const uniqueProjects = new Set(sessions.map(s => s.cwd).filter(Boolean)).size;
+  const totalTokens = sessions.reduce((acc, s) => acc + (s.totalTokens || 0), 0);
+
+  const tSessionsEl = $('stats-total-sessions');
+  const tProjectsEl = $('stats-total-projects');
+  const tTokensEl = $('stats-total-tokens');
+
+  if (tSessionsEl) tSessionsEl.textContent = String(totalSessions);
+  if (tProjectsEl) tProjectsEl.textContent = String(uniqueProjects);
+  if (tTokensEl) tTokensEl.textContent = formatTokenCount(totalTokens);
+
+  const cells = getMonthGrid(calYear, calMonth);
+
+  if (!selectedCalDate) {
+    selectedCalDate = getLocalDateString(new Date());
+  }
+
+  grid.innerHTML = cells.map(cell => {
+    const day = cell.date;
+    const dateStr = getLocalDateString(day);
+    const daySessions = getSessionsForDate(day, sessions);
+    const count = daySessions.length;
+    const isToday = day.toDateString() === new Date().toDateString();
+    const isSelected = dateStr === selectedCalDate;
+    
+    let bgClass = '';
+    let textClass = 'text-base-content/65';
+    let borderClass = 'border border-transparent';
+    let cursorClass = 'cursor-default';
+    let opacityClass = cell.isCurrentMonth ? '' : 'opacity-25';
+
+    if (count > 0) {
+      cursorClass = 'cursor-pointer';
+      if (count <= 2) {
+        bgClass = 'bg-primary/15';
+        textClass = 'text-primary font-bold';
+        borderClass = 'border border-primary/30';
+      } else if (count <= 5) {
+        bgClass = 'bg-primary/30';
+        textClass = 'text-primary font-bold';
+        borderClass = 'border border-primary/50';
+      } else {
+        bgClass = 'bg-primary/60';
+        textClass = 'text-primary-content font-bold';
+        borderClass = 'border border-primary/80';
+      }
+    } else {
+      bgClass = 'bg-base-300/25';
+      if (cell.isCurrentMonth) cursorClass = 'hover:bg-base-300/50';
+    }
+
+    if (isToday) {
+      borderClass = 'border-2 border-primary';
+    } else if (isSelected) {
+      borderClass = 'border-2 border-accent';
+    }
+
+    const monthLabel = day.getDate() === 1 ? `<span class="absolute top-0.5 left-1 text-[8px] opacity-60 uppercase">${day.toLocaleDateString([], {month:'short'})}</span>` : '';
+
+    return `
+      <div class="aspect-square rounded-xl flex flex-col items-center justify-center p-2 relative transition-all min-h-[50px] md:min-h-[60px] ${bgClass} ${textClass} ${borderClass} ${cursorClass} ${opacityClass}" 
+           data-cal-date="${dateStr}" title="${day.toDateString()}: ${count} session(s)">
+        ${monthLabel}
+        <span class="text-sm font-semibold">${day.getDate()}</span>
+        ${count > 0 ? `<span class="text-[10px] mt-0.5 opacity-80 font-medium whitespace-nowrap">${count}s</span>` : ''}
+      </div>`;
+  }).join('');
+
+  showSelectedDaySessions(sessions);
+  updateRecentSessionsList(sessions);
+}
+
+function showSelectedDaySessions(sessions) {
+  const titleEl = $('selected-day-title');
+  const listEl = $('selected-day-sessions');
+  if (!titleEl || !listEl) return;
+
+  const [y, m, d] = selectedCalDate.split('-').map(Number);
+  const targetDate = new Date(y, m - 1, d);
+  titleEl.textContent = `Activity on ${targetDate.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}`;
+
+  const daySessions = getSessionsForDate(targetDate, sessions);
+  const selectedTokens = daySessions.reduce((acc, s) => acc + (s.totalTokens || 0), 0);
+  const sTokensEl = $('stats-selected-tokens');
+  if (sTokensEl) sTokensEl.textContent = formatTokenCount(selectedTokens);
+
+  if (!daySessions.length) {
+    listEl.innerHTML = `<div class="text-center text-xs text-base-content/40 my-auto py-6">No sessions active on this day</div>`;
+    return;
+  }
+
+  daySessions.sort((a, b) => b.updatedAt - a.updatedAt);
+
+  listEl.innerHTML = daySessions.map(s => {
+    const timeStr = new Date(s.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const active = ctx.sessionId === s.sessionId;
+    return `
+      <div class="flex items-center gap-2.5 p-2.5 rounded-lg bg-base-300/40 hover:bg-base-300 border border-base-300/50 cursor-pointer text-left transition-all ${active ? 'border-primary bg-primary/5' : ''}"
+           data-session-id="${esc(s.sessionId)}"
+           data-session-cwd="${esc(s.cwd || '')}"
+           data-session-config-dir="${esc(s.configDir || '')}"
+           data-session-agent="${esc(s.agent || 'claude')}">
+        <div class="flex-shrink-0">${agentBadge(s.agent)}</div>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs font-semibold truncate text-base-content/90">${esc(s.display || s.sessionId.slice(0, 8))}</div>
+          <div class="text-[10px] text-base-content/40 truncate mt-0.5">${esc(s.projectName || shortPath(s.cwd) || 'No workspace')}</div>
+        </div>
+        <div class="text-[9px] text-base-content/45 font-mono whitespace-nowrap bg-base-300 px-1.5 py-0.5 rounded">${timeStr}</div>
+      </div>`;
+  }).join('');
+}
+
+function updateRecentSessionsList(sessions) {
+  const container = $('recent-sessions-list');
+  if (!container) return;
+
+  const recent = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 6);
+
+  if (!recent.length) {
+    container.innerHTML = `<div class="col-span-full text-center text-xs text-base-content/40 py-4">No recent sessions</div>`;
+    return;
+  }
+
+  container.innerHTML = recent.map(s => {
+    const timeStr = formatTime(s.updatedAt);
+    const active = ctx.sessionId === s.sessionId;
+    return `
+      <div class="flex items-center gap-2.5 p-3 rounded-xl bg-base-200 hover:bg-base-300 border border-base-300/80 cursor-pointer text-left transition-all ${active ? 'border-primary bg-primary/5' : ''}"
+           data-session-id="${esc(s.sessionId)}"
+           data-session-cwd="${esc(s.cwd || '')}"
+           data-session-config-dir="${esc(s.configDir || '')}"
+           data-session-agent="${esc(s.agent || 'claude')}">
+        <div class="flex-shrink-0">${agentBadge(s.agent)}</div>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs font-bold truncate text-base-content/95">${esc(s.display || s.sessionId.slice(0, 8))}</div>
+          <div class="text-[10px] text-base-content/40 truncate mt-1">${esc(s.projectName || shortPath(s.cwd) || 'No workspace')}</div>
+        </div>
+        <div class="text-[9px] text-base-content/40 whitespace-nowrap self-start mt-0.5">${timeStr}</div>
+      </div>`;
+  }).join('');
+}
 
 // ── Sessions + Workspaces ─────────────────────────────────────────────────────
 export async function loadAllSessions() {
@@ -357,13 +626,21 @@ function renderProjectGroups(groups) {
   }
 
   const expanded = expandedFolders.value;
-  const forceOpen = !!sessionSearch.value.trim() || groups.length <= 3;
+  const collapsed = collapsedFolders.value;
+  const forceOpen = !!sessionSearch.value.trim();
   // Auto-expand the most recently active project
   const topCwd = groups[0]?.cwd || '(no path)';
 
   return groups.map(g => {
     const key = g.cwd || '(no path)';
-    const open = forceOpen || expanded.has(key) || key === topCwd;
+    let open = false;
+    if (collapsed.has(key)) {
+      open = false;
+    } else if (expanded.has(key)) {
+      open = true;
+    } else {
+      open = forceOpen || key === topCwd || groups.length <= 3;
+    }
     const latestTitle = g.latest?.display || g.latest?.snippet || '';
     const header = `
       <div class="project-header px-2.5 py-2 cursor-pointer hover:bg-base-300/80 select-none border-b border-base-300/40"
@@ -558,6 +835,24 @@ export function openProject(project) {
   switchTab('chat');
 }
 
+export function goHome() {
+  currentProject.value = null;
+  sessionFilter.value = null;
+  filesRoot.value = '';
+  gitRoot.value = '';
+  filesPath.value = '';
+  viewingFile.value = null;
+  ctx.sessionId = null;
+
+  const topbar = $('topbar-project');
+  if (topbar) topbar.textContent = 'Select a session';
+  const welcome = $('welcome');
+  if (welcome) welcome.classList.remove('hidden');
+  const pv = $('project-view');
+  if (pv) pv.classList.add('hidden');
+  setHash('/');
+}
+
 export async function resumeSession(sid, cwd, configDir, agent) {
   const resolvedAgent = agent
     || sessionsData.peek().find(s => s.sessionId === sid)?.agent
@@ -570,11 +865,18 @@ export async function resumeSession(sid, cwd, configDir, agent) {
 
   if (cwd && cwd !== currentProject.peek()?.path) {
     const name = cwd.split('/').filter(Boolean).pop() || cwd;
-    batch(() => { currentProject.value = { id: name, name, path: cwd }; sessionFilter.value = cwd; });
+    batch(() => {
+      currentProject.value = { id: name, name, path: cwd };
+      sessionFilter.value = cwd;
+      filesRoot.value = '';
+      gitRoot.value = '';
+      filesPath.value = '';
+      viewingFile.value = null;
+    });
     $('topbar-project').textContent = cwd;
     // Pre-fill root inputs with session cwd so user can see/edit the path
-    const fi = $('files-root-input'); if (fi && !filesRoot.peek()) fi.value = cwd;
-    const gi = $('git-root-input');   if (gi && !gitRoot.peek())   gi.value = cwd;
+    const fi = $('files-root-input'); if (fi) fi.value = cwd;
+    const gi = $('git-root-input');   if (gi) gi.value = cwd;
     const pv = $('project-view');
     pv.classList.remove('hidden');
     pv.style.display = 'flex';
@@ -582,8 +884,17 @@ export async function resumeSession(sid, cwd, configDir, agent) {
     if (!ctx.ws || ctx.ws.readyState !== WebSocket.OPEN) connectWS();
   } else if (!currentProject.peek() && cwd) {
     const name = cwd.split('/').filter(Boolean).pop() || cwd;
-    batch(() => { currentProject.value = { id: name, name, path: cwd }; sessionFilter.value = cwd; });
+    batch(() => {
+      currentProject.value = { id: name, name, path: cwd };
+      sessionFilter.value = cwd;
+      filesRoot.value = '';
+      gitRoot.value = '';
+      filesPath.value = '';
+      viewingFile.value = null;
+    });
     $('topbar-project').textContent = cwd;
+    const fi = $('files-root-input'); if (fi) fi.value = cwd;
+    const gi = $('git-root-input');   if (gi) gi.value = cwd;
     $('welcome').classList.add('hidden');
     const pv = $('project-view');
     pv.classList.remove('hidden');
@@ -637,6 +948,16 @@ export function switchTab(name) { currentTab.value = name; }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export async function initAuth() {
+  const authScreen = $('auth-screen');
+  if (authScreen) {
+    authScreen.classList.remove('hidden');
+    authScreen.style.display = 'flex';
+  }
+  const app = $('app');
+  if (app) {
+    app.classList.add('hidden');
+    app.style.display = 'none';
+  }
   const status = await api('GET', '/api/auth/status');
   const btn = $('auth-btn');
   if (status.needsSetup) {
@@ -806,6 +1127,27 @@ export function initShell() {
   // 0. Restore saved theme
   applyTheme(localStorage.getItem('theme') || 'dark');
 
+  // Inject xterm.js local files
+  if (!document.getElementById('xterm-css')) {
+    const css = document.createElement('link');
+    css.id = 'xterm-css';
+    css.rel = 'stylesheet';
+    css.href = '/xterm.min.css';
+    document.head.appendChild(css);
+  }
+  if (!document.getElementById('xterm-js')) {
+    const js = document.createElement('script');
+    js.id = 'xterm-js';
+    js.src = '/xterm.min.js';
+    document.head.appendChild(js);
+  }
+  if (!document.getElementById('xterm-fit-js')) {
+    const jsFit = document.createElement('script');
+    jsFit.id = 'xterm-fit-js';
+    jsFit.src = '/addon-fit.min.js';
+    document.head.appendChild(jsFit);
+  }
+
   // 1. Render into #root (ensure it fills viewport)
   const root = document.getElementById('root');
   root.style.cssText = 'display:flex;flex-direction:column;flex:1;height:100%';
@@ -842,6 +1184,12 @@ export function initShell() {
     syncSidebarChrome();
   });
 
+  // 3b. Welcome dashboard activity calendar
+  effect(() => {
+    const sessions = filteredSessions.value;
+    updateDashboard(sessions);
+  });
+
   // 3. Filter badge
   watch(sessionFilter, f => {
     const badge = $('session-filter-badge');
@@ -873,6 +1221,7 @@ export function initShell() {
 
   // 6. Listen for new sessions from WS
   document.addEventListener('sessions-changed', loadAllSessions);
+  document.addEventListener('router:home', goHome);
 
   // 7. Router: deep-link to a session by id
   document.addEventListener('router:session', async ({ detail: { id, tab } }) => {
@@ -882,6 +1231,7 @@ export function initShell() {
   });
 
   // 7. Event delegation
+  delegate.on('click', '#btn-home', goHome);
   delegate.on('click', '#auth-btn', submitAuth);
   delegate.on('keydown', '#auth-username, #auth-password', e => { if (e.key === 'Enter') submitAuth(); });
   delegate.on('click', '#hamburger', () => $('sidebar').classList.contains('open') ? closeSidebar() : openSidebar());
@@ -922,6 +1272,29 @@ export function initShell() {
   delegate.on('click', '#btn-settings', openSettings);
   delegate.on('click', '#btn-theme', toggleTheme);
 
+  delegate.on('click', '#btn-cal-prev', () => {
+    calMonth--;
+    if (calMonth < 0) {
+      calMonth = 11;
+      calYear--;
+    }
+    updateDashboard(sessionsData.peek());
+  });
+
+  delegate.on('click', '#btn-cal-next', () => {
+    calMonth++;
+    if (calMonth > 11) {
+      calMonth = 0;
+      calYear++;
+    }
+    updateDashboard(sessionsData.peek());
+  });
+
+  delegate.on('click', '[data-cal-date]', (_, el) => {
+    selectedCalDate = el.dataset.calDate;
+    updateDashboard(sessionsData.peek());
+  });
+
   delegate.on('click', '[data-session-id]', (e, el) => {
     resumeSession(
       el.dataset.sessionId,
@@ -934,9 +1307,24 @@ export function initShell() {
 
   delegate.on('click', '[data-folder]', (_, el) => {
     const cwd  = el.dataset.folder;
-    const next = new Set(expandedFolders.peek());
-    next.has(cwd) ? next.delete(cwd) : next.add(cwd);
-    expandedFolders.value = next;   // new Set → triggers the session-list effect
+    const chevron = el.querySelector('span')?.textContent.trim();
+    const wasOpen = chevron === '▾';
+
+    const nextExpanded = new Set(expandedFolders.peek());
+    const nextCollapsed = new Set(collapsedFolders.peek());
+
+    if (wasOpen) {
+      nextExpanded.delete(cwd);
+      nextCollapsed.add(cwd);
+    } else {
+      nextExpanded.add(cwd);
+      nextCollapsed.delete(cwd);
+    }
+
+    batch(() => {
+      expandedFolders.value = nextExpanded;
+      collapsedFolders.value = nextCollapsed;
+    });
   });
 
   delegate.on('click', '#memory-refresh', loadMemoryTab);

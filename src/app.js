@@ -3,7 +3,7 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { promises as fs } from 'fs';
 import fsSync from 'fs';
 import path from 'path';
@@ -17,6 +17,7 @@ import {
   scanAllSessions,
   loadSessionMessages,
   loadSessionMemory,
+  loadSessionUsage,
   searchActivity,
   groupByProject,
   toClientSession,
@@ -479,6 +480,33 @@ export function createApp() {
     });
   });
 
+  // Session / context usage (Grok signals + turn totals; Claude last usage; Codex meta)
+  // GET /api/usage?sessionId=...&agent=grok
+  app.get('/api/usage', authMiddleware, async (req, res) => {
+    try {
+      const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : null;
+      const preferred = typeof req.query.agent === 'string' ? req.query.agent : null;
+      if (!sessionId || !/^[0-9a-f-]{36}$/i.test(sessionId)) {
+        return res.status(400).json({ error: 'sessionId (uuid) required' });
+      }
+      const opts = {
+        claudeConfigDirs: CLAUDE_CONFIG_DIRS,
+        codexHome: CODEX_HOME,
+        grokHome: GROK_HOME,
+      };
+      const order = [...new Set([preferred, ...ENABLED_AGENTS, 'claude', 'codex', 'grok'].filter(Boolean))];
+      let data = null;
+      for (const a of order) {
+        data = await loadSessionUsage(sessionId, a, opts);
+        if (data) break;
+      }
+      if (!data) return res.status(404).json({ error: 'Session not found' });
+      res.json(data);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get('/api/sessions', authMiddleware, async (req, res) => {
     try {
       const filterCwd = typeof req.query.cwd === 'string' ? req.query.cwd : null;
@@ -676,12 +704,68 @@ export function createApp() {
     const send = d => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(d)); };
 
     let proc;
+    let hasPython = false;
     try {
-      proc = spawn('bash', ['--norc', '--noprofile'], {
-        cwd: fsSync.existsSync(cwd) ? cwd : os.homedir(),
-        env: { ...process.env, TERM: 'xterm-256color', PS1: '\\[\\033[32m\\]\\w\\[\\033[0m\\]$ ', HISTFILE: '' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      execSync('python3 --version', { stdio: 'ignore' });
+      hasPython = true;
+    } catch {}
+
+    const cols = parseInt(url.searchParams.get('cols') || '80', 10);
+    const rows = parseInt(url.searchParams.get('rows') || '24', 10);
+
+    try {
+      const shellBin = process.env.SHELL || 'zsh';
+      if (hasPython) {
+        const pythonScript = `
+import os, pty, sys, termios, fcntl, struct, select
+shell = '${shellBin}'
+cols, rows = ${cols}, ${rows}
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(shell, [shell])
+else:
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except:
+        pass
+    while True:
+        try:
+            r, w, x = select.select([0, fd], [], [])
+            if 0 in r:
+                data = os.read(0, 1024)
+                if not data: break
+                if data.startswith(b'\\x00resize:'):
+                    try:
+                        _, c, r = data.split(b':')
+                        cols, rows = int(c), int(r)
+                        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+                    except:
+                        pass
+                else:
+                    os.write(fd, data)
+            if fd in r:
+                data = os.read(fd, 1024)
+                if not data: break
+                os.write(1, data)
+        except:
+            break
+`;
+        proc = spawn('python3', ['-c', pythonScript], {
+          cwd: fsSync.existsSync(cwd) ? cwd : os.homedir(),
+          env: { ...process.env, TERM: 'xterm-256color' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } else {
+        const args = ['-i'];
+        if (shellBin.includes('bash')) {
+          args.push('--norc', '--noprofile');
+        }
+        proc = spawn(shellBin, args, {
+          cwd: fsSync.existsSync(cwd) ? cwd : os.homedir(),
+          env: { ...process.env, TERM: 'xterm-256color', PS1: '\\[\\033[32m\\]\\w\\[\\033[0m\\]$ ', HISTFILE: '' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }
     } catch (e) {
       send({ type: 'error', data: e.message });
       ws.close();
@@ -695,7 +779,11 @@ export function createApp() {
 
     ws.on('message', raw => {
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
-      if (msg.type === 'input' && proc.stdin.writable) proc.stdin.write(msg.data);
+      if (msg.type === 'input' && proc.stdin.writable) {
+        proc.stdin.write(msg.data);
+      } else if (msg.type === 'resize' && proc.stdin.writable && hasPython) {
+        proc.stdin.write(`\x00resize:${msg.cols}:${msg.rows}`);
+      }
     });
 
     ws.on('close', () => { try { proc.kill('SIGHUP'); } catch {} });

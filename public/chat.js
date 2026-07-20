@@ -2,7 +2,7 @@
 import { watch, delegate, esc, $ } from './lib.js';
 import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEffort, currentPermission,
          currentAgent, setAgent, AGENT_LABELS, AGENT_DEFAULT_MODEL, chatDensity } from './state.js';
-import { sendWs } from './api.js';
+import { sendWs, api } from './api.js';
 
 function assistantLabel() {
   return AGENT_LABELS[currentAgent.peek()] || 'Assistant';
@@ -46,7 +46,7 @@ function handleWsMessage(msg) {
     isProcessing.value = false;
     const u = msg.usage;
     if (u) {
-      appendHistoryTokenBar({
+      const norm = {
         input_tokens: u.inputTokens ?? u.input_tokens,
         output_tokens: u.outputTokens ?? u.output_tokens,
         cache_read_input_tokens: u.cacheReadInputTokens ?? u.cache_read_input_tokens,
@@ -54,7 +54,10 @@ function handleWsMessage(msg) {
         total_tokens: u.totalTokens ?? u.total_tokens,
         reasoning_tokens: u.reasoningTokens ?? u.reasoning_tokens,
         costUSD: u.costUSD ?? u.cost_usd,
-      });
+      };
+      ctx.lastUsage = norm;
+      if (ctx.sessionId) ctx.lastUsageSessionId = ctx.sessionId;
+      appendHistoryTokenBar(norm);
     }
     if (!msg.is_error) appendSystemMsg('✓ Done');
     return;
@@ -313,12 +316,138 @@ function handleSlashCommand(text) {
     case 'clear':
       clearMessages();
       ctx.sessionId = null;
+      ctx.lastUsage = null;
       appendSystemMsg('Cleared · new session');
       return true;
-    default: {
-      appendSystemMsg(`Available slash commands:\n  /agent [claude|codex|grok]\n  /model [haiku|sonnet|opus|<model-id>]\n  /effort [low|medium|high|xhigh|max]\n  /clear`);
+    case 'usage': {
+      // Async fetch — return true immediately so message isn't sent to the model
+      showUsageCommand();
       return true;
     }
+    case 'help': {
+      appendSystemMsg(`Available slash commands:\n  /agent [claude|codex|grok]\n  /model [haiku|sonnet|opus|<model-id>]\n  /effort [low|medium|high|xhigh|max]\n  /usage\n  /clear\n  /help`);
+      return true;
+    }
+    default: {
+      return false;
+    }
+  }
+}
+
+function fmtUsageNum(n) {
+  if (n == null || Number.isNaN(Number(n))) return '—';
+  const v = Number(n);
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+  return String(Math.round(v));
+}
+
+/** /usage — show last-turn + session context (Grok signals, etc.) */
+async function showUsageCommand() {
+  const agent = currentAgent.peek() || 'claude';
+  const model = currentModel.peek() || '—';
+  const sid = ctx.sessionId;
+  const lines = [
+    `Agent: ${AGENT_LABELS[agent] || agent}`,
+    `Model: ${model}`,
+    `Session: ${sid ? sid.slice(0, 8) + '…' : '(new — send a message first)'}`,
+  ];
+
+  // Live last-turn from this browser session
+  if (ctx.lastUsage && (!sid || ctx.lastUsageSessionId === sid)) {
+    const u = ctx.lastUsage;
+    lines.push(
+      `Last turn: ↑${fmtUsageNum(u.input_tokens)} ↓${fmtUsageNum(u.output_tokens)}`
+      + (u.cache_read_input_tokens ? ` · ${fmtUsageNum(u.cache_read_input_tokens)} cached` : '')
+      + (u.reasoning_tokens ? ` · ${fmtUsageNum(u.reasoning_tokens)} reason` : '')
+      + (u.total_tokens ? ` · Σ${fmtUsageNum(u.total_tokens)}` : '')
+      + (u.costUSD != null ? ` · $${Number(u.costUSD).toFixed(4)}` : ''),
+    );
+  }
+
+  if (!sid) {
+    appendSystemMsg(lines.join('\n'));
+    appendTokenBar('◈ /usage · no session yet');
+    return;
+  }
+
+  appendSystemMsg('Loading usage…');
+  try {
+    const q = new URLSearchParams({ sessionId: sid, agent });
+    const data = await api('GET', `/api/usage?${q}`);
+    const c = data.context || {};
+    if (c.model) lines[1] = `Model: ${c.model}`;
+    if (c.title) lines.push(`Title: ${c.title}`);
+
+    if (c.tokensUsed != null || c.windowTokens != null || c.usagePercent != null) {
+      const used = c.tokensUsed != null ? fmtUsageNum(c.tokensUsed) : '—';
+      const win = c.windowTokens != null ? fmtUsageNum(c.windowTokens) : '—';
+      const pct = c.usagePercent != null ? `${c.usagePercent}%` : '—';
+      lines.push(`Context window: ${used} / ${win} (${pct})`);
+    }
+    if (c.turnCount != null) lines.push(`Turns: ${c.turnCount}`);
+    if (c.toolCallCount != null) lines.push(`Tools: ${c.toolCallCount}`);
+    if (c.sessionDurationSeconds != null) {
+      const m = Math.floor(c.sessionDurationSeconds / 60);
+      const s = Math.round(c.sessionDurationSeconds % 60);
+      lines.push(`Duration: ${m}m ${s}s`);
+    }
+    if (c.sessionTotals) {
+      const t = c.sessionTotals;
+      lines.push(
+        `Session totals: ↑${fmtUsageNum(t.input_tokens)} ↓${fmtUsageNum(t.output_tokens)}`
+        + (t.cache_read_input_tokens ? ` · ${fmtUsageNum(t.cache_read_input_tokens)} cached` : '')
+        + (t.total_tokens ? ` · Σ${fmtUsageNum(t.total_tokens)}` : '')
+        + (t.costUSD ? ` · $${Number(t.costUSD).toFixed(4)}` : ''),
+      );
+    }
+    if (c.lastTurn && !ctx.lastUsage) {
+      const u = c.lastTurn;
+      lines.push(
+        `Last completed turn: ↑${fmtUsageNum(u.input_tokens)} ↓${fmtUsageNum(u.output_tokens)}`
+        + (u.cache_read_input_tokens ? ` · ${fmtUsageNum(u.cache_read_input_tokens)} cached` : '')
+        + (u.costUSD != null ? ` · $${Number(u.costUSD).toFixed(4)}` : ''),
+      );
+    }
+    if (c.note) lines.push(c.note);
+
+    // Replace "Loading usage…" with full report
+    const msgs = $('messages');
+    if (msgs) {
+      const kids = [...msgs.children];
+      for (let i = kids.length - 1; i >= 0; i--) {
+        if (kids[i].textContent === 'Loading usage…') { kids[i].remove(); break; }
+      }
+    }
+    appendSystemMsg(lines.join('\n'));
+
+    // Visual token / context bars
+    if (c.tokensUsed != null || c.windowTokens != null) {
+      appendContextBar({
+        tokensUsed: c.tokensUsed,
+        windowTokens: c.windowTokens,
+        usagePercent: c.usagePercent,
+        model: c.model || model,
+        turnCount: c.turnCount,
+        toolCallCount: c.toolCallCount,
+      });
+    }
+    if (c.sessionTotals) {
+      appendHistoryTokenBar(c.sessionTotals);
+    } else if (c.lastTurn) {
+      appendHistoryTokenBar(c.lastTurn);
+    } else if (ctx.lastUsage) {
+      appendHistoryTokenBar(ctx.lastUsage);
+    }
+  } catch (e) {
+    const msgs = $('messages');
+    if (msgs) {
+      const kids = [...msgs.children];
+      for (let i = kids.length - 1; i >= 0; i--) {
+        if (kids[i].textContent === 'Loading usage…') { kids[i].remove(); break; }
+      }
+    }
+    appendSystemMsg(`${lines.join('\n')}\n(usage fetch failed: ${e.message})`);
   }
 }
 
@@ -332,8 +461,9 @@ export function sendMessage() {
   updateInputMode('');
 
   if (text.startsWith('/')) {
-    handleSlashCommand(text);
-    return;
+    if (handleSlashCommand(text)) {
+      return;
+    }
   }
 
   isProcessing.value = true;

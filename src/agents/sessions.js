@@ -26,6 +26,7 @@ async function loadClaudeHistoryNames(configDirs) {
 async function readClaudeSessionMeta(filePath) {
   let sessionId = null;
   let cwd = null;
+  let totalTokens = 0;
   try {
     const stream = fsSync.createReadStream(filePath);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -34,11 +35,14 @@ async function readClaudeSessionMeta(filePath) {
         const d = JSON.parse(line);
         if (!sessionId && d.sessionId) sessionId = d.sessionId;
         if (!cwd && d.cwd) cwd = d.cwd;
-        if (sessionId && cwd) { rl.close(); stream.destroy(); break; }
+        const u = d.message?.usage;
+        if (u) {
+          totalTokens += (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
+        }
       } catch {}
     }
   } catch {}
-  return { sessionId, cwd };
+  return { sessionId, cwd, totalTokens };
 }
 
 async function readClaudeFirstMessage(filePath) {
@@ -102,6 +106,7 @@ async function scanClaudeConfigDir(configDir, nameMap, filterCwd) {
           display: nameMap.get(sessionId) || firstMsg || 'Session',
           updatedAt: stat.mtimeMs,
           hasMemory,
+          totalTokens: meta.totalTokens || 0,
         });
       } catch {}
     }));
@@ -400,6 +405,12 @@ export async function scanGrokSessions(grokHome, filterCwd = null) {
         hasMemory = true;
       } catch {}
 
+      let totalTokens = 0;
+      try {
+        const sig = JSON.parse(await fs.readFile(path.join(sessionDir, 'signals.json'), 'utf8'));
+        totalTokens = sig.contextTokensUsed ?? 0;
+      } catch {}
+
       sessions.push({
         sessionId,
         agent: 'grok',
@@ -409,6 +420,7 @@ export async function scanGrokSessions(grokHome, filterCwd = null) {
         updatedAt,
         hasMemory,
         sessionDir,
+        totalTokens,
       });
     }));
   }));
@@ -636,6 +648,7 @@ async function loadGrokContext(sessionDir) {
     turnCount: null,
     toolCallCount: null,
     sessionDurationSeconds: null,
+    lastTurn: null, // last turn_completed usage from updates.jsonl
   };
   try {
     const sig = JSON.parse(await fs.readFile(path.join(sessionDir, 'signals.json'), 'utf8'));
@@ -654,7 +667,90 @@ async function loadGrokContext(sessionDir) {
     context.updatedAt = summary.updated_at || summary.last_active_at || null;
     context.title = summary.session_summary || summary.generated_title || null;
   } catch {}
+  // Last completed turn usage (input/output/cache/cost)
+  try {
+    const updates = await loadGrokUpdates(sessionDir);
+    if (updates.turnUsages?.length) {
+      const last = updates.turnUsages[updates.turnUsages.length - 1];
+      context.lastTurn = { ...last.usage, ts: last.ts };
+      // Aggregate totals across turns when available
+      const sum = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cache_read_input_tokens: 0, costUSD: 0 };
+      for (const t of updates.turnUsages) {
+        sum.input_tokens += t.usage.input_tokens || 0;
+        sum.output_tokens += t.usage.output_tokens || 0;
+        sum.total_tokens += t.usage.total_tokens || 0;
+        sum.cache_read_input_tokens += t.usage.cache_read_input_tokens || 0;
+        sum.costUSD += Number(t.usage.costUSD) || 0;
+      }
+      context.sessionTotals = sum;
+      context.completedTurns = updates.turnUsages.length;
+    }
+  } catch {}
   return context;
+}
+
+/** Public helper: load usage/context for any agent session. */
+export async function loadSessionUsage(sessionId, agent, { claudeConfigDirs, codexHome, grokHome }) {
+  const a = (agent || 'claude').toLowerCase();
+  if (a === 'grok') {
+    const dir = await findGrokSessionDir(sessionId, grokHome);
+    if (!dir) return null;
+    const context = await loadGrokContext(dir);
+    return { agent: 'grok', sessionId, context };
+  }
+  if (a === 'codex') {
+    const file = await findCodexSessionFile(sessionId, codexHome);
+    if (!file) return null;
+    // Codex has no signals.json equivalent here — return file meta only
+    try {
+      const st = await fs.stat(file);
+      return {
+        agent: 'codex',
+        sessionId,
+        context: {
+          model: null,
+          tokensUsed: null,
+          windowTokens: null,
+          usagePercent: null,
+          updatedAt: new Date(st.mtimeMs).toISOString(),
+          note: 'Codex per-session context window not exposed; see last-turn bar after a reply.',
+        },
+      };
+    } catch {
+      return { agent: 'codex', sessionId, context: null };
+    }
+  }
+  // Claude — best-effort from session jsonl last usage
+  const file = await findClaudeSessionFile(sessionId, claudeConfigDirs || []);
+  if (!file) return null;
+  let lastUsage = null;
+  try {
+    const stream = fsSync.createReadStream(file);
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of rl) {
+      let d;
+      try { d = JSON.parse(line); } catch { continue; }
+      const u = d.message?.usage || d.usage;
+      if (u && (u.input_tokens || u.output_tokens)) {
+        lastUsage = {
+          input_tokens: u.input_tokens ?? 0,
+          output_tokens: u.output_tokens ?? 0,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+          total_tokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
+        };
+      }
+    }
+  } catch {}
+  return {
+    agent: 'claude',
+    sessionId,
+    context: {
+      model: null,
+      lastTurn: lastUsage,
+      note: lastUsage ? null : 'No usage records in this Claude session yet.',
+    },
+  };
 }
 
 export async function parseGrokMessages(sessionDir) {
@@ -756,6 +852,7 @@ function publicSession(s) {
     updatedAt: s.updatedAt || 0,
     hasMemory: Boolean(s.hasMemory),
     projectName: projectNameFromCwd(cwd),
+    totalTokens: s.totalTokens || 0,
     // keep for deep search only when needed — not sent if stripped below
     _filePath: s.filePath || null,
     _sessionDir: s.sessionDir || null,

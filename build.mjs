@@ -59,6 +59,20 @@ console.log('Fetching highlight.js...');
   await writeFile('dist/highlight.min.css', await hjsCss.text());
 }
 
+// 3c. xterm.js — fetch xterm core + fit addon, inline into public & dist
+console.log('Fetching xterm.js...');
+{
+  const xtermCss = await (await fetch('https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css')).text();
+  await writeFile('public/xterm.min.css', xtermCss);
+  await writeFile('dist/xterm.min.css', xtermCss);
+  const xtermJs = await (await fetch('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js')).text();
+  await writeFile('public/xterm.min.js', xtermJs);
+  await writeFile('dist/xterm.min.js', xtermJs);
+  const xtermFitJs = await (await fetch('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js')).text();
+  await writeFile('public/addon-fit.min.js', xtermFitJs);
+  await writeFile('dist/addon-fit.min.js', xtermFitJs);
+}
+
 // 4. index.html pointing to jsDelivr CDN
 await writeFile('dist/index.html', `<!DOCTYPE html>
 <html lang="en" data-theme="night">

@@ -82,16 +82,17 @@ npm install -g @openai/codex
 
 ### Shell Tab
 
-- Persistent bash session per WebSocket connection
-- ANSI color rendering
-- Command history (↑↓), Ctrl+C, Ctrl+D, Ctrl+L (clear)
-- Authenticated via JWT token in query string
-- No interactive TUI programs (no pty — vim/top won't work)
+- Full interactive pseudoterminal (PTY) powered by `xterm.js` and a lightweight Python 3 `pty` fork helper
+- Real-time character-by-character input mode (not line-buffered)
+- Fully supports interactive TUI applications (e.g. `vim`, `top`, `htop`, `nano`)
+- Interactive shell features: autocompletion (`Tab`), backspace, and native key navigation (`ArrowUp`/`ArrowDown` history)
+- Auto-fit responsive terminal resizing (syncs terminal window dimensions dynamically between frontend and backend via PTY ioctls)
+- Easy one-click reconnect and output clear
 
 ## Stack
 
-- **Backend**: Node.js + Express + `ws` + `@anthropic-ai/claude-agent-sdk` + Codex/Grok CLI subprocesses
-- **Frontend**: Vanilla ES Modules + [mini-react](https://github.com/forechoandlook/mini-react) (signals, keyedList, effects) + DaisyUI + Tailwind CDN
+- **Backend**: Node.js + Express + `ws` + `@anthropic-ai/claude-agent-sdk` + Python PTY subprocess helper (no native compilation required)
+- **Frontend**: Vanilla ES Modules + [mini-react](https://github.com/forechoandlook/mini-react) (signals, keyedList, effects) + DaisyUI + Tailwind + xterm.js (local assets)
 - **Storage**: IndexedDB (session cache, 5-min TTL) + JSON files (credentials, workspaces, JWT secret)
 - **No build step** (dev): browser loads `.js` files directly; optional `npm run build` for dist/
 

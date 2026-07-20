@@ -1,10 +1,7 @@
 // files.js — Files tab with upload / download / delete
-import { signal, effect, delegate, esc, $ } from './lib.js';
-import { currentProject, currentTab, filesRoot, ctx } from './state.js';
+import { effect, delegate, esc, $ } from './lib.js';
+import { currentProject, currentTab, filesRoot, filesPath, viewingFile, ctx } from './state.js';
 import { api } from './api.js';
-
-export const filesPath   = signal('');
-export const viewingFile = signal(null);
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 function fileIcon(name) {
