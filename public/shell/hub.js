@@ -183,5 +183,3 @@ export async function enterMachine(machineId, { forceReload = false } = {}) {
   hubMachineReady.value = true;
 }
 
-/**
- * @param {{ hub?: object|false, deepLink?: { id: string, tab?: string }|null }} [opts]

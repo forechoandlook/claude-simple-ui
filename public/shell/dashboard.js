@@ -217,6 +217,7 @@ export function updateRecentSessionsList(sessions) {
         <div class="text-[9px] text-base-content/40 whitespace-nowrap self-start mt-0.5">${timeStr}</div>
       </div>`;
   }).join('');
+}
 
 export function setCalMonthYear(m, y) { calMonth = m; calYear = y; }
 export function setSelectedCalDate(d) { selectedCalDate = d; }
