@@ -6,7 +6,7 @@ import {
 import { probeHub } from '../api.js';
 import { getCachedSessions } from '../cache.js';
 import { getLastSessionContext } from './session-context.js';
-import { loadAllSessions, loadWorkspaces } from './session-list.js';
+import { loadAllSessions, loadWorkspaces, loadAgentsMeta } from './session-list.js';
 import { loadSessionMetaMap } from './notes.js';
 import { resumeSession } from './session-nav.js';
 import {
@@ -80,11 +80,12 @@ export async function showApp(opts = {}) {
     startMachinePolling();
     syncTopbarMachine();
 
-    // Sessions/workspaces: paint cache fast, refresh bg — don't block deep-link
+    // Sessions/workspaces/models: paint cache fast, refresh bg — don't block deep-link
     const dataP = Promise.all([
       loadAllSessions({ waitFresh: false }),
       loadWorkspaces({ waitFresh: false }),
       loadSessionMetaMap().catch(() => {}),
+      loadAgentsMeta().catch(() => {}),
     ]);
 
     // Deep-link ASAP using lastSessionContext / list cache
@@ -126,11 +127,12 @@ export async function showApp(opts = {}) {
     return;
   }
 
-  // Standalone: cache-first sessions, then deep link
+  // Standalone: cache-first sessions + live model lists, then deep link
   const dataP = Promise.all([
     loadAllSessions({ waitFresh: false }),
     loadWorkspaces({ waitFresh: false }),
     loadSessionMetaMap().catch(() => {}),
+    loadAgentsMeta().catch(() => {}),
   ]);
 
   if (deep?.id) {

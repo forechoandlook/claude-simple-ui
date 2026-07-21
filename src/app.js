@@ -24,6 +24,7 @@ import {
   convertSession,
 } from './agents/sessions.js';
 import { createMetaAgent } from './agents/meta-agent.js';
+import { discoverAllAgentModels } from './agents/models.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
 
@@ -359,6 +360,11 @@ export function createApp() {
   console.log(`[static] serving ${usesDist ? 'dist/' : 'public/'} (NODE_ENV=${process.env.NODE_ENV || 'unset'})`);
   app.use(express.static(staticDir));
 
+  // Standalone: report "not a hub" with 200 so browser probe isn't a red 404
+  app.get('/api/hub', (_req, res) => {
+    res.json({ hub: false });
+  });
+
   // Avoid noisy favicon 404s in the browser console
   app.get('/favicon.ico', (_req, res) => {
     res.type('image/svg+xml').send(
@@ -556,19 +562,30 @@ export function createApp() {
   });
 
   app.get('/api/agents', authMiddleware, async (_req, res) => {
-    res.json({
-      enabled: ENABLED_AGENTS,
-      defaults: {
-        claude: { model: 'claude-sonnet-4-5', models: ['claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-haiku-4-5'] },
-        codex:  { model: 'gpt-5.4', models: ['gpt-5.4', 'gpt-5.3', 'gpt-5.2', 'o3', 'o4-mini', 'codex-mini-latest'] },
-        grok:   { model: 'grok-4.5', models: ['grok-4.5', 'grok-4', 'grok-3', 'grok-3-mini'] },
-      },
-      paths: {
-        claude: CLAUDE_CLI_PATH,
-        codex: CODEX_CLI_PATH,
-        grok: GROK_CLI_PATH,
-      },
-    });
+    try {
+      const defaults = await discoverAllAgentModels({
+        claudeConfigDirs: CLAUDE_CONFIG_DIRS,
+        codexHome: CODEX_HOME,
+        grokHome: GROK_HOME,
+        agents: ENABLED_AGENTS,
+      });
+      res.json({
+        enabled: ENABLED_AGENTS,
+        defaults,
+        homes: {
+          claude: CLAUDE_CONFIG_DIRS,
+          codex: CODEX_HOME,
+          grok: GROK_HOME,
+        },
+        paths: {
+          claude: CLAUDE_CLI_PATH,
+          codex: CODEX_CLI_PATH,
+          grok: GROK_CLI_PATH,
+        },
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   app.get('/api/projects/notes', authMiddleware, async (req, res) => {
@@ -614,7 +631,7 @@ export function createApp() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // ── Session meta: favorites + per-session notes ───────────────────────────
+  // ── Session meta: favorites + notes + title (rename map) ─────────────────
   app.get('/api/sessions/meta', authMiddleware, async (_req, res) => {
     try {
       const db = await loadSessionMeta();
@@ -624,24 +641,32 @@ export function createApp() {
 
   app.put('/api/sessions/meta', authMiddleware, async (req, res) => {
     try {
-      const { sessionId, agent, favorite, notes } = req.body || {};
+      const { sessionId, agent, favorite, notes, title } = req.body || {};
       if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
       const key = sessionMetaKey(agent || 'claude', sessionId);
       const db = await loadSessionMeta();
-      const prev = db[key] || { favorite: false, notes: '', updatedAt: 0 };
+      const prev = db[key] || { favorite: false, notes: '', title: '', updatedAt: 0 };
       const next = {
         favorite: favorite !== undefined ? Boolean(favorite) : Boolean(prev.favorite),
         notes: notes !== undefined ? String(notes || '') : String(prev.notes || ''),
+        // Custom display name mapping; empty string clears rename
+        title: title !== undefined
+          ? String(title || '').trim().slice(0, 200)
+          : String(prev.title || '').trim(),
         updatedAt: Date.now(),
       };
       // Drop empty entries to keep file small
-      if (!next.favorite && !next.notes) {
+      if (!next.favorite && !next.notes && !next.title) {
         delete db[key];
       } else {
         db[key] = next;
       }
       await saveSessionMeta();
-      res.json({ success: true, key, ...(db[key] || { favorite: false, notes: '', updatedAt: Date.now() }) });
+      res.json({
+        success: true,
+        key,
+        ...(db[key] || { favorite: false, notes: '', title: '', updatedAt: Date.now() }),
+      });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

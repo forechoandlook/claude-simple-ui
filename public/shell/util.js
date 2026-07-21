@@ -2,14 +2,35 @@
 import { esc } from '../lib.js';
 import { AGENT_LABELS } from '../state.js';
 
+/** Coerce history/API timestamps to epoch milliseconds. */
+export function coerceTs(ts) {
+  if (ts == null || ts === '') return null;
+  if (typeof ts === 'number') {
+    if (!Number.isFinite(ts) || ts <= 0) return null;
+    // Unix seconds (~1e9–1e10) → ms; already-ms is ~1e12–1e13
+    return ts < 1e12 ? Math.round(ts * 1000) : Math.round(ts);
+  }
+  if (typeof ts === 'string') {
+    const trimmed = ts.trim();
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      return coerceTs(Number(trimmed));
+    }
+    const ms = Date.parse(trimmed);
+    return Number.isNaN(ms) ? null : ms;
+  }
+  return null;
+}
+
 export function formatTime(ts) {
-  if (!ts) return '';
-  const diff = Date.now() - ts;
+  const ms = coerceTs(ts);
+  if (ms == null) return '';
+  const diff = Date.now() - ms;
+  if (diff < 0) return new Date(ms).toLocaleDateString();
   if (diff < 60000)       return 'just now';
   if (diff < 3600000)     return `${Math.floor(diff / 60000)}m ago`;
   if (diff < 86400000)    return `${Math.floor(diff / 3600000)}h ago`;
-  if (diff < 7*86400000)  return `${Math.floor(diff / 86400000)}d ago`;
-  return new Date(ts).toLocaleDateString();
+  if (diff < 7 * 86400000) return `${Math.floor(diff / 86400000)}d ago`;
+  return new Date(ms).toLocaleDateString();
 }
 
 export function agentBadge(agent, compact = true) {

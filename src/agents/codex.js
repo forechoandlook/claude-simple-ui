@@ -116,11 +116,15 @@ export function runCodex(command, options, send, { cliPath, activeSessions }) {
     const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 
     function flushText() {
+      // Dedupe identical bodies (CLI may emit agent_message + message for one turn)
+      const seen = new Set();
       for (const text of pendingText) {
-        if (!text?.trim()) continue;
+        const t = text?.trim();
+        if (!t || seen.has(t)) continue;
+        seen.add(t);
         // Stream-friendly: open bubble, dump text, close (codex emits completed items, not token deltas)
         send({ type: 'assistant_stream_start', agent: 'codex', ts: Date.now() });
-        send({ type: 'assistant_delta', data: text, agent: 'codex' });
+        send({ type: 'assistant_delta', data: t, agent: 'codex' });
         send({ type: 'assistant_stream_end', agent: 'codex' });
       }
       pendingText = [];
@@ -132,8 +136,10 @@ export function runCodex(command, options, send, { cliPath, activeSessions }) {
 
       if (itemType === 'agent_message' || itemType === 'message') {
         if (phase === 'completed') {
-          const text = extractItemText(item);
-          if (text) pendingText.push(text);
+          const text = extractItemText(item)?.trim();
+          if (text && !pendingText.some(t => (t || '').trim() === text)) {
+            pendingText.push(text);
+          }
         }
         return;
       }

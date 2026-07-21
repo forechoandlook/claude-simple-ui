@@ -331,6 +331,31 @@ export async function findCodexSessionFile(sessionId, codexHome) {
 
 export async function parseCodexMessages(filePath) {
   const messages = [];
+  // Codex writes the same assistant turn twice:
+  //   response_item (message/assistant)  AND  event_msg (agent_message)
+  // Prefer response_item; only use event_msg when that text wasn't already seen.
+  const seenAssistant = new Set();
+
+  const assistantKey = (text, ts) => {
+    const t = String(text || '').trim();
+    if (!t) return '';
+    // Same second + same body is the dual-write case (identical timestamps in UI)
+    const tsPart = ts != null ? String(ts) : '';
+    return `${tsPart}\n${t}`;
+  };
+
+  const pushAssistant = (text, ts) => {
+    const t = String(text || '').trim();
+    if (!t) return;
+    const key = assistantKey(t, ts);
+    if (seenAssistant.has(key)) return;
+    // Also skip pure text duplicates even if ts differs slightly
+    if (seenAssistant.has(t)) return;
+    seenAssistant.add(key);
+    seenAssistant.add(t);
+    messages.push({ role: 'assistant', type: 'text', content: t, ts });
+  };
+
   try {
     const stream = fsSync.createReadStream(filePath);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -356,8 +381,7 @@ export async function parseCodexMessages(filePath) {
             .filter(c => c.type === 'output_text' || c.type === 'text')
             .map(c => c.text || '')
             .filter(Boolean);
-          const text = texts.join('\n').trim();
-          if (text) messages.push({ role: 'assistant', type: 'text', content: text, ts: d.timestamp });
+          pushAssistant(texts.join('\n'), d.timestamp);
         } else if (p.type === 'function_call') {
           let input = p.arguments;
           try { input = typeof input === 'string' ? JSON.parse(input) : input; } catch {}
@@ -373,9 +397,10 @@ export async function parseCodexMessages(filePath) {
         }
       }
 
+      // Secondary channel — skip if response_item already recorded the same body
       if (d.type === 'event_msg' && d.payload?.type === 'agent_message') {
         const text = d.payload.message || d.payload.text;
-        if (text) messages.push({ role: 'assistant', type: 'text', content: text, ts: d.timestamp });
+        pushAssistant(text, d.timestamp);
       }
     }
   } catch {}

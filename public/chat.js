@@ -1,7 +1,8 @@
 // chat.js — WebSocket, message rendering, send actions
 import { watch, delegate, esc, $ } from './lib.js';
 import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEffort, currentPermission,
-         currentAgent, setAgent, AGENT_LABELS, AGENT_DEFAULT_MODEL, chatDensity } from './state.js';
+         currentAgent, setAgent, AGENT_LABELS, getDefaultModel, getModelsForAgent, getEffortsForModel,
+         addCustomModel, chatDensity } from './state.js';
 import { sendWs, api } from './api.js';
 
 function assistantLabel() {
@@ -283,7 +284,7 @@ function handleSlashCommand(text) {
       if (a !== currentAgent.peek()) {
         ctx.sessionId = null;
         setAgent(a);
-        currentModel.value = AGENT_DEFAULT_MODEL[a];
+        currentModel.value = getDefaultModel(a);
         localStorage.setItem('model', currentModel.peek());
         document.dispatchEvent(new CustomEvent('agent-changed'));
         appendSystemMsg(`Agent → ${AGENT_LABELS[a]} · model ${currentModel.peek()} · new session`);
@@ -294,18 +295,24 @@ function handleSlashCommand(text) {
     }
     case 'model': {
       if (!arg) {
-        appendSystemMsg(`Current model: ${currentModel.peek()} (${currentAgent.peek()})`);
+        const agent = currentAgent.peek();
+        const list = getModelsForAgent(agent).map(m => m.value).join(' | ');
+        appendSystemMsg(`Current model: ${currentModel.peek()} (${agent})${list ? `\nAvailable: ${list}` : ''}`);
         return true;
       }
       const resolved = MODEL_ALIASES[arg.toLowerCase()] || arg;
+      const agent = currentAgent.peek() || 'claude';
+      // Persist free-form ids so they stay in the model dropdown
+      const known = getModelsForAgent(agent).some(m => m.value === resolved);
+      if (!known) addCustomModel(agent, resolved);
       currentModel.value = resolved;
       localStorage.setItem('model', resolved);
-      appendSystemMsg(`Model set to ${resolved}`);
+      appendSystemMsg(`Model set to ${resolved}${known ? '' : ' (saved as custom ★)'}`);
       document.dispatchEvent(new CustomEvent('agent-changed'));
       return true;
     }
     case 'effort': {
-      const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
+      const levels = getEffortsForModel(currentAgent.peek(), currentModel.peek());
       if (!arg) {
         appendSystemMsg(`Current effort: ${currentEffort.peek() || '(default)'} · levels: ${levels.join(' | ')}`);
         return true;
@@ -529,25 +536,9 @@ function autoResize(el) {
 const USER_COLLAPSE = 200;
 const ASST_COLLAPSE = 500;
 
-/** Coerce history/live timestamps to epoch milliseconds. */
-export function coerceTs(ts) {
-  if (ts == null || ts === '') return null;
-  if (typeof ts === 'number') {
-    if (!Number.isFinite(ts) || ts <= 0) return null;
-    // Unix seconds (~1e9–1e10) → ms; already-ms is ~1e12–1e13
-    return ts < 1e12 ? Math.round(ts * 1000) : Math.round(ts);
-  }
-  if (typeof ts === 'string') {
-    const trimmed = ts.trim();
-    if (/^\d+(\.\d+)?$/.test(trimmed)) {
-      const n = Number(trimmed);
-      return coerceTs(n);
-    }
-    const ms = Date.parse(trimmed);
-    return Number.isNaN(ms) ? null : ms;
-  }
-  return null;
-}
+// Re-export shared timestamp helper (also used by shell/dashboard)
+export { coerceTs } from './shell/util.js';
+import { coerceTs } from './shell/util.js';
 
 /**
  * Format a timestamp for chat (local time).

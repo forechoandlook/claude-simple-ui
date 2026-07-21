@@ -1,11 +1,38 @@
 // shell/dashboard.js — welcome calendar + stats
 import { esc, $ } from '../lib.js';
-import { ctx } from '../state.js';
-import { formatTime, agentBadge, shortPath } from './util.js';
+import {
+  ctx, sessionsData, agentFilter, hubMode, selectedMachineId, sessionDisplayTitle,
+} from '../state.js';
+import { formatTime, agentBadge, shortPath, coerceTs } from './util.js';
 
 export let calYear = new Date().getFullYear();
 export let calMonth = new Date().getMonth(); // 0-11
 export let selectedCalDate = null;
+
+function asSessionArray(v) {
+  if (Array.isArray(v)) return v;
+  if (v && Array.isArray(v.results)) return v.results;
+  if (v && Array.isArray(v.sessions)) return v.sessions;
+  return [];
+}
+
+/**
+ * Sessions for home calendar/stats.
+ * Uses full session list (not sidebar 14d / 120-cap filters) so the month grid is complete.
+ * Still respects agent filter + hub machine selection.
+ */
+export function getDashboardSessions() {
+  let list = asSessionArray(sessionsData.peek());
+  const mid = selectedMachineId.peek();
+  if (hubMode.peek() && mid) {
+    list = list.filter(s => s && (!s.machineId || s.machineId === mid));
+  }
+  const aFilter = agentFilter.peek();
+  if (aFilter && aFilter !== 'all') {
+    list = list.filter(s => s && (s.agent || 'claude') === aFilter);
+  }
+  return list;
+}
 
 function getLocalDateString(date) {
   const y = date.getFullYear();
@@ -54,7 +81,7 @@ function getSessionsForDate(date, sessions) {
   const end = start + 24 * 60 * 60 * 1000;
   return sessions.filter(s => {
     const ts = coerceTs(s.updatedAt);
-    return ts >= start && ts < end;
+    return ts != null && ts >= start && ts < end;
   });
 }
 
@@ -69,6 +96,9 @@ export function updateDashboard(sessions) {
   const grid = $('calendar-grid');
   if (!grid) return;
 
+  // Always normalize; callers may pass filteredSessions / cache shapes
+  sessions = asSessionArray(sessions != null ? sessions : getDashboardSessions());
+
   const header = $('calendar-month-year');
   if (header) {
     const dummyDate = new Date(calYear, calMonth, 1);
@@ -78,7 +108,7 @@ export function updateDashboard(sessions) {
   // Calculate total sessions, unique projects, and total tokens
   const totalSessions = sessions.length;
   const uniqueProjects = new Set(sessions.map(s => s.cwd).filter(Boolean)).size;
-  const totalTokens = sessions.reduce((acc, s) => acc + (s.totalTokens || 0), 0);
+  const totalTokens = sessions.reduce((acc, s) => acc + (Number(s.totalTokens) || 0), 0);
 
   const tSessionsEl = $('stats-total-sessions');
   const tProjectsEl = $('stats-total-projects');
@@ -158,8 +188,9 @@ export function showSelectedDaySessions(sessions) {
   const targetDate = new Date(y, m - 1, d);
   titleEl.textContent = `Activity on ${targetDate.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}`;
 
+  sessions = asSessionArray(sessions);
   const daySessions = getSessionsForDate(targetDate, sessions);
-  const selectedTokens = daySessions.reduce((acc, s) => acc + (s.totalTokens || 0), 0);
+  const selectedTokens = daySessions.reduce((acc, s) => acc + (Number(s.totalTokens) || 0), 0);
   const sTokensEl = $('stats-selected-tokens');
   if (sTokensEl) sTokensEl.textContent = formatTokenCount(selectedTokens);
 
@@ -168,20 +199,24 @@ export function showSelectedDaySessions(sessions) {
     return;
   }
 
-  daySessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  daySessions.sort((a, b) => (coerceTs(b.updatedAt) || 0) - (coerceTs(a.updatedAt) || 0));
 
   listEl.innerHTML = daySessions.map(s => {
-    const timeStr = new Date(s.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const ms = coerceTs(s.updatedAt);
+    const timeStr = ms != null
+      ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '';
     const active = ctx.sessionId === s.sessionId;
     return `
       <div class="flex items-center gap-2.5 p-2.5 rounded-lg bg-base-300/40 hover:bg-base-300 border border-base-300/50 cursor-pointer text-left transition-all ${active ? 'border-primary bg-primary/5' : ''}"
            data-session-id="${esc(s.sessionId)}"
            data-session-cwd="${esc(s.cwd || '')}"
            data-session-config-dir="${esc(s.configDir || '')}"
-           data-session-agent="${esc(s.agent || 'claude')}">
+           data-session-agent="${esc(s.agent || 'claude')}"
+           data-session-machine="${esc(s.machineId || '')}">
         <div class="flex-shrink-0">${agentBadge(s.agent)}</div>
         <div class="flex-1 min-w-0">
-          <div class="text-xs font-semibold truncate text-base-content/90">${esc(s.display || s.sessionId.slice(0, 8))}</div>
+          <div class="text-xs font-semibold truncate text-base-content/90">${esc(sessionDisplayTitle(s))}</div>
           <div class="text-[10px] text-base-content/40 truncate mt-0.5">${esc(s.projectName || shortPath(s.cwd) || 'No workspace')}</div>
         </div>
         <div class="text-[9px] text-base-content/45 font-mono whitespace-nowrap bg-base-300 px-1.5 py-0.5 rounded">${timeStr}</div>
@@ -193,7 +228,10 @@ export function updateRecentSessionsList(sessions) {
   const container = $('recent-sessions-list');
   if (!container) return;
 
-  const recent = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 6);
+  sessions = asSessionArray(sessions);
+  const recent = [...sessions]
+    .sort((a, b) => (coerceTs(b.updatedAt) || 0) - (coerceTs(a.updatedAt) || 0))
+    .slice(0, 6);
 
   if (!recent.length) {
     container.innerHTML = `<div class="col-span-full text-center text-xs text-base-content/40 py-4">No recent sessions</div>`;
@@ -208,10 +246,11 @@ export function updateRecentSessionsList(sessions) {
            data-session-id="${esc(s.sessionId)}"
            data-session-cwd="${esc(s.cwd || '')}"
            data-session-config-dir="${esc(s.configDir || '')}"
-           data-session-agent="${esc(s.agent || 'claude')}">
+           data-session-agent="${esc(s.agent || 'claude')}"
+           data-session-machine="${esc(s.machineId || '')}">
         <div class="flex-shrink-0">${agentBadge(s.agent)}</div>
         <div class="flex-1 min-w-0">
-          <div class="text-xs font-bold truncate text-base-content/95">${esc(s.display || s.sessionId.slice(0, 8))}</div>
+          <div class="text-xs font-bold truncate text-base-content/95">${esc(sessionDisplayTitle(s))}</div>
           <div class="text-[10px] text-base-content/40 truncate mt-1">${esc(s.projectName || shortPath(s.cwd) || 'No workspace')}</div>
         </div>
         <div class="text-[9px] text-base-content/40 whitespace-nowrap self-start mt-0.5">${timeStr}</div>

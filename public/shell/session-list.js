@@ -5,8 +5,10 @@ import {
   expandedFolders, collapsedFolders, filteredSessions, projectGroups,
   currentModel, currentAgent,
   sidebarView, agentFilter, timeRange, activityHits, activityLoading,
-  sessionMetaMap, LOW_TURN_THRESHOLD, metaKey,
-  hubMode, selectedMachineId, AGENT_MODELS, AGENT_DEFAULT_MODEL, ctx,
+  sessionMetaMap, LOW_TURN_THRESHOLD, metaKey, sessionDisplayTitle,
+  hubMode, selectedMachineId, agentsMeta, currentEffort,
+  getModelsForAgent, getDefaultModel, getEffortsForModel,
+  addCustomModel, removeCustomModel, getCustomModels, ctx,
 } from '../state.js';
 import { api } from '../api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from '../cache.js';
@@ -71,10 +73,11 @@ export async function loadWorkspaces({ waitFresh = true } = {}) {
 }
 export function sessionItemHtml(s, { showProject = false } = {}) {
   const active = ctx.sessionId === s.sessionId && (ctx.agent || currentAgent.peek()) === (s.agent || 'claude');
-  const title  = s.snippet && sessionSearch.peek()
-    ? s.snippet
-    : (s.display || s.sessionId.slice(0, 8));
   const meta = sessionMetaMap.peek()?.[metaKey(s.agent, s.sessionId, s.machineId)] || {};
+  const renamed = !!(meta.title && String(meta.title).trim());
+  const title = s.snippet && sessionSearch.peek()
+    ? s.snippet
+    : sessionDisplayTitle(s);
   const fav = !!meta.favorite;
   const hasNote = !!(meta.notes && String(meta.notes).trim());
   const turns = Number(s.turnCount) || 0;
@@ -84,18 +87,23 @@ export function sessionItemHtml(s, { showProject = false } = {}) {
     : '';
   const badges = [
     thin ? `<span class="session-thin-badge" title="Only ${turns} turn${turns === 1 ? '' : 's'}">thin·${turns}</span>` : '',
+    renamed ? `<span class="session-renamed-badge" title="Custom name (original: ${esc(s.display || '')})">✎</span>` : '',
     hasNote ? `<span class="session-note-dot" title="${esc(meta.notes)}">📝</span>` : '',
   ].filter(Boolean).join('');
   const machineBadge = s.machineId
     ? `<span class="text-[9px] px-1 py-0.5 rounded bg-base-300 text-base-content/50 font-mono flex-shrink-0" title="Machine">${esc(s.machineId)}</span>`
     : '';
+  const tip = renamed
+    ? `${title}\n(original: ${s.display || s.sessionId})`
+    : (s.display || '');
   return `<div class="session-row px-2.5 py-1.5 cursor-pointer hover:bg-base-300 border-l-2
               ${active ? 'border-primary bg-primary/5' : 'border-transparent'} ${fav ? 'session-fav' : ''} ${thin ? 'session-thin' : ''}"
        data-session-id="${esc(s.sessionId)}"
        data-session-cwd="${esc(s.cwd || '')}"
        data-session-config-dir="${esc(s.configDir || '')}"
        data-session-agent="${esc(s.agent || 'claude')}"
-       data-session-machine="${esc(s.machineId || '')}">
+       data-session-machine="${esc(s.machineId || '')}"
+       data-session-display="${esc(s.display || '')}">
     <div class="flex items-start gap-1.5">
       <button type="button" class="session-fav-btn flex-shrink-0 leading-none mt-0.5 ${fav ? 'is-fav' : ''}"
               data-fav-toggle="1"
@@ -105,8 +113,19 @@ export function sessionItemHtml(s, { showProject = false } = {}) {
               title="${fav ? 'Unfavorite' : 'Favorite'}">${fav ? '★' : '☆'}</button>
       ${agentBadge(s.agent)}
       <div class="min-w-0 flex-1">
-        <div class="text-[11px] leading-snug truncate ${active ? 'text-primary font-medium' : 'text-base-content/85'}"
-             title="${esc(s.display || '')}">${esc(title)}</div>
+        <div class="session-title-wrap flex items-center gap-1 min-w-0"
+             data-session-id="${esc(s.sessionId)}"
+             data-rename-session-id="${esc(s.sessionId)}"
+             data-rename-session-agent="${esc(s.agent || 'claude')}"
+             data-rename-session-machine="${esc(s.machineId || '')}"
+             data-rename-session-display="${esc(s.display || '')}">
+          <div class="session-title-text text-[11px] leading-snug truncate flex-1 min-w-0 ${active ? 'text-primary font-medium' : 'text-base-content/85'} ${renamed ? 'session-title-renamed' : ''}"
+               data-rename-session="1"
+               title="${esc(tip)} · click to rename">${esc(title)}</div>
+          <button type="button" class="session-rename-btn flex-shrink-0"
+                  data-rename-session="1"
+                  title="Rename session">✎</button>
+        </div>
         ${projectLine}
         ${badges || machineBadge ? `<div class="flex items-center gap-1 mt-0.5 flex-wrap">${machineBadge}${badges}</div>` : ''}
       </div>
@@ -115,25 +134,97 @@ export function sessionItemHtml(s, { showProject = false } = {}) {
   </div>`;
 }
 
+/** Load /api/agents model lists into agentsMeta (Codex/Grok caches + Claude settings). */
+export async function loadAgentsMeta() {
+  try {
+    const data = await api('GET', '/api/agents');
+    agentsMeta.value = data;
+    // Align current model with discovered list for active agent
+    const agent = currentAgent.peek() || 'claude';
+    const models = getModelsForAgent(agent);
+    const cur = currentModel.peek();
+    if (cur && !models.some(m => m.value === cur)) {
+      const def = getDefaultModel(agent);
+      currentModel.value = def;
+      localStorage.setItem('model', def);
+    }
+    refreshModelSelect();
+    return data;
+  } catch (e) {
+    console.warn('[agents] failed to load model list', e);
+    return null;
+  }
+}
+
+export function refreshEffortSelect() {
+  const sel = $('sel-effort');
+  if (!sel) return;
+  const agent = currentAgent.peek() || 'claude';
+  const model = currentModel.peek();
+  const efforts = getEffortsForModel(agent, model);
+  const cur = currentEffort.peek() || '';
+  const opts = [`<option value="">effort: off</option>`]
+    .concat(efforts.map(e =>
+      `<option value="${esc(e)}" ${e === cur ? 'selected' : ''}>${esc(e)}</option>`
+    ));
+  sel.innerHTML = opts.join('');
+  if (cur && !efforts.includes(cur)) {
+    currentEffort.value = '';
+    sel.value = '';
+  } else {
+    sel.value = cur;
+  }
+}
+
 export function refreshModelSelect() {
   const sel = $('sel-model');
   if (!sel) return;
   const agent = currentAgent.peek() || 'claude';
-  const models = AGENT_MODELS[agent] || AGENT_MODELS.claude;
-  const cur = currentModel.peek();
+  let models = getModelsForAgent(agent);
+  let cur = currentModel.peek();
+  // Keep a free-typed /model value visible even if not in list
+  if (cur && !models.some(m => m.value === cur)) {
+    models = [{ value: cur, label: `${cur} ★`, custom: true }, ...models];
+  }
   sel.innerHTML = models.map(m =>
     `<option value="${esc(m.value)}" ${m.value === cur ? 'selected' : ''}>${esc(m.label)}</option>`
   ).join('');
   if (!models.some(m => m.value === cur)) {
-    const def = AGENT_DEFAULT_MODEL[agent] || models[0]?.value;
+    const def = getDefaultModel(agent) || models[0]?.value;
     currentModel.value = def;
     localStorage.setItem('model', def);
     sel.value = def;
+    cur = def;
   } else {
     sel.value = cur;
   }
   const agentSel = $('sel-agent');
   if (agentSel) agentSel.value = agent;
+  refreshEffortSelect();
+}
+
+/**
+ * Prompt user for a model id, save as custom for current agent, select it.
+ * @param {{ editCurrent?: boolean }} opts
+ */
+export function promptCustomModel({ editCurrent = false } = {}) {
+  const agent = currentAgent.peek() || 'claude';
+  const initial = editCurrent ? (currentModel.peek() || '') : '';
+  const msg = editCurrent
+    ? `Edit model id for ${agent}:`
+    : `Add model id for ${agent} (saved in this browser):`;
+  const raw = window.prompt(msg, initial);
+  if (raw == null) return;
+  const id = raw.trim();
+  if (!id) return;
+
+  if (editCurrent && initial && initial !== id && getCustomModels(agent).includes(initial)) {
+    removeCustomModel(agent, initial);
+  }
+  addCustomModel(agent, id);
+  currentModel.value = id;
+  localStorage.setItem('model', id);
+  refreshModelSelect();
 }
 
 export function renderProjectGroups(groups) {

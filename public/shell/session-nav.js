@@ -14,7 +14,7 @@ import {
 import { setHash, syncHash } from '../router.js';
 import { refreshModelSelect } from './session-list.js';
 import { renderSessionNotesBar } from './notes.js';
-import { updateDashboard } from './dashboard.js';
+import { updateDashboard, getDashboardSessions } from './dashboard.js';
 
 /** Show which edge machine Files/Git/Shell paths belong to. */
 function syncMachinePathHints(machineId) {
@@ -79,8 +79,7 @@ export function goHome() {
   if (welcome) {
     welcome.classList.remove('hidden');
     welcome.style.display = '';
-    const sessions = filteredSessions.peek();
-    if (Array.isArray(sessions)) updateDashboard(sessions);
+    updateDashboard(getDashboardSessions());
   }
   const pv = $('project-view');
   if (pv) {

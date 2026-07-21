@@ -19,7 +19,7 @@ export const currentEffort     = signal('');
 export const currentPermission = signal('default'); // 'default'|'acceptEdits'|'bypassPermissions'|'plan'|'auto'
 export const filesRoot      = signal(''); // custom root override for Files tab
 export const gitRoot        = signal(''); // custom root override for Git tab
-export const agentsMeta     = signal(null); // from /api/agents
+export const agentsMeta     = signal(null); // from /api/agents (dynamic model lists)
 
 // Sidebar project-management filters
 export const sidebarView    = signal(localStorage.getItem('sidebarView') || 'projects'); // 'projects' | 'timeline'
@@ -27,7 +27,7 @@ export const agentFilter    = signal(localStorage.getItem('agentFilter') || 'all
 export const timeRange      = signal(localStorage.getItem('timeRange') || '14'); // '0'|'1'|'7'|'14'|'30'
 export const activityHits   = signal(null); // null | { q, results, loading, error }
 export const activityLoading = signal(false);
-/** agent:sessionId → { favorite, notes, updatedAt } */
+/** agent:sessionId → { favorite, notes, title, updatedAt }  (title = rename map) */
 export const sessionMetaMap = signal({});
 /** Sidebar: show only favorited sessions */
 export const favoritesOnly  = signal(localStorage.getItem('favoritesOnly') === '1');
@@ -77,7 +77,17 @@ export function metaKey(agent, sessionId, machineId) {
 
 export function getSessionMeta(agent, sessionId, machineId) {
   const m = sessionMetaMap.peek()?.[metaKey(agent, sessionId, machineId)];
-  return m || { favorite: false, notes: '' };
+  return m || { favorite: false, notes: '', title: '' };
+}
+
+/** Display title: user rename map → original display → short id. */
+export function sessionDisplayTitle(s, { preferSnippet = false } = {}) {
+  if (!s) return 'Session';
+  if (preferSnippet && s.snippet) return s.snippet;
+  const meta = getSessionMeta(s.agent, s.sessionId, s.machineId);
+  const custom = (meta.title || '').trim();
+  if (custom) return custom;
+  return s.display || s.sessionId?.slice(0, 8) || 'Session';
 }
 
 export function setChatDensity(d) {
@@ -93,6 +103,7 @@ export const AGENT_LABELS = {
   grok:   'Grok',
 };
 
+/** Static fallbacks when /api/agents has not loaded yet. */
 export const AGENT_MODELS = {
   claude: [
     { value: 'claude-sonnet-4-5', label: 'sonnet-4-5' },
@@ -122,12 +133,118 @@ export const AGENT_DEFAULT_MODEL = {
   grok:   'grok-4.5',
 };
 
+function normalizeModelEntry(m) {
+  if (!m) return null;
+  if (typeof m === 'string') return { value: m, label: m };
+  if (!m.value) return null;
+  return {
+    value: String(m.value),
+    label: m.label || m.value,
+    ...(Array.isArray(m.efforts) && m.efforts.length ? { efforts: m.efforts.map(String) } : {}),
+    ...(m.defaultEffort ? { defaultEffort: String(m.defaultEffort) } : {}),
+  };
+}
+
+const CUSTOM_MODELS_KEY = 'customModelsByAgent';
+
+function readCustomModelsMap() {
+  try {
+    const raw = localStorage.getItem(CUSTOM_MODELS_KEY);
+    if (!raw) return {};
+    const o = JSON.parse(raw);
+    return o && typeof o === 'object' ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCustomModelsMap(map) {
+  localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(map));
+}
+
+/** User-added model ids for an agent (localStorage). */
+export function getCustomModels(agent) {
+  const a = (agent || 'claude').toLowerCase();
+  const list = readCustomModelsMap()[a];
+  return Array.isArray(list) ? list.filter(Boolean).map(String) : [];
+}
+
+/** Persist a custom model id for agent (idempotent). */
+export function addCustomModel(agent, modelId) {
+  const a = (agent || 'claude').toLowerCase();
+  const id = String(modelId || '').trim();
+  if (!id) return false;
+  const map = readCustomModelsMap();
+  const list = Array.isArray(map[a]) ? [...map[a]] : [];
+  if (!list.includes(id)) list.push(id);
+  map[a] = list;
+  writeCustomModelsMap(map);
+  return true;
+}
+
+/** Remove a custom model id (only from user list, not discovery). */
+export function removeCustomModel(agent, modelId) {
+  const a = (agent || 'claude').toLowerCase();
+  const id = String(modelId || '').trim();
+  const map = readCustomModelsMap();
+  const list = Array.isArray(map[a]) ? map[a].filter(x => x !== id) : [];
+  map[a] = list;
+  writeCustomModelsMap(map);
+  return true;
+}
+
+/** Models for agent: discovery + user custom + static fallback. */
+export function getModelsForAgent(agent) {
+  const a = (agent || 'claude').toLowerCase();
+  const meta = agentsMeta.peek()?.defaults?.[a];
+  let base = meta?.models?.length
+    ? meta.models.map(normalizeModelEntry).filter(Boolean)
+    : (AGENT_MODELS[a] || AGENT_MODELS.claude).map(m => ({ ...m }));
+
+  const custom = getCustomModels(a);
+  const seen = new Set(base.map(m => m.value));
+  for (const id of custom) {
+    if (seen.has(id)) {
+      base = base.map(m => {
+        if (m.value !== id) return m;
+        const label = String(m.label || m.value);
+        return {
+          ...m,
+          custom: true,
+          label: label.includes('★') ? label : `${label} ★`,
+        };
+      });
+      continue;
+    }
+    seen.add(id);
+    base.push({ value: id, label: `${id} ★`, custom: true });
+  }
+  return base;
+}
+
+export function getDefaultModel(agent) {
+  const a = (agent || 'claude').toLowerCase();
+  const meta = agentsMeta.peek()?.defaults?.[a];
+  if (meta?.model) return String(meta.model);
+  return AGENT_DEFAULT_MODEL[a] || getModelsForAgent(a)[0]?.value || 'claude-sonnet-4-5';
+}
+
+/** Effort levels for current (or given) model under agent. */
+export function getEffortsForModel(agent, modelId) {
+  const models = getModelsForAgent(agent);
+  const m = models.find(x => x.value === modelId);
+  if (m?.efforts?.length) return m.efforts;
+  const meta = agentsMeta.peek()?.defaults?.[(agent || 'claude').toLowerCase()];
+  if (meta?.efforts?.length) return meta.efforts.map(String);
+  return ['low', 'medium', 'high', 'xhigh', 'max'];
+}
+
 export function setAgent(agent) {
   const a = (agent || 'claude').toLowerCase();
   currentAgent.value = a;
   localStorage.setItem('agent', a);
-  const models = AGENT_MODELS[a] || AGENT_MODELS.claude;
-  const def = AGENT_DEFAULT_MODEL[a] || models[0]?.value;
+  const models = getModelsForAgent(a);
+  const def = getDefaultModel(a);
   if (!models.some(m => m.value === currentModel.peek())) {
     currentModel.value = def;
     localStorage.setItem('model', def);
@@ -142,7 +259,14 @@ function matchesAgentFilter(s, filter) {
 function matchesTimeRange(s, daysStr) {
   const days = parseInt(daysStr || '0', 10) || 0;
   if (days <= 0) return true;
-  return (s.updatedAt || 0) >= Date.now() - days * 86400000;
+  let ts = s.updatedAt || 0;
+  if (typeof ts === 'string') {
+    const n = Number(ts);
+    ts = Number.isFinite(n) && n > 0 ? (n < 1e12 ? n * 1000 : n) : Date.parse(ts) || 0;
+  } else if (typeof ts === 'number' && ts > 0 && ts < 1e12) {
+    ts = ts * 1000;
+  }
+  return ts >= Date.now() - days * 86400000;
 }
 
 function matchesSearch(s, search) {
@@ -150,7 +274,7 @@ function matchesSearch(s, search) {
   const meta = sessionMetaMap.value?.[metaKey(s.agent, s.sessionId, s.machineId)];
   const hay = [
     s.display, s.cwd, s.projectName, s.agent, s.sessionId, s.snippet, s.machineId,
-    meta?.notes,
+    meta?.notes, meta?.title,
   ].filter(Boolean).join(' ').toLowerCase();
   return hay.includes(search);
 }

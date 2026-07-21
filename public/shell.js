@@ -10,7 +10,7 @@ import {
   sidebarView, agentFilter, timeRange, activityHits, activityLoading,
   chatDensity, setChatDensity,
   favoritesOnly, hubMode, hubMachineReady, selectedMachineId, setSelectedMachine,
-  machinesList, AGENT_LABELS, AGENT_DEFAULT_MODEL, ctx,
+  machinesList, AGENT_LABELS, getDefaultModel, sessionMetaMap, ctx,
 } from './state.js';
 import { api } from './api.js';
 import { getLastSessionContext } from './shell/session-context.js';
@@ -23,17 +23,18 @@ import { initSettings, openSettings } from './settings.js';
 import { openMetaAgent, toggleMetaAgent } from './agent-panel.js';
 
 import { AuthScreen, AppShell } from './shell/templates.js';
-import { updateDashboard, shiftCalMonth, setSelectedCalDate } from './shell/dashboard.js';
+import { updateDashboard, shiftCalMonth, setSelectedCalDate, getDashboardSessions } from './shell/dashboard.js';
 import {
   loadAllSessions, loadWorkspaces, renderSessionList, syncSidebarChrome,
-  refreshModelSelect, scheduleActivitySearch, runActivitySearch, loadMemoryTab,
+  refreshModelSelect, refreshEffortSelect, promptCustomModel,
+  scheduleActivitySearch, runActivitySearch, loadMemoryTab,
 } from './shell/session-list.js';
 import { openProject, goHome, resumeSession, switchTab } from './shell/session-nav.js';
 import { showApp } from './shell/boot.js';
 import {
   fetchProjectNotes, renderProjectNotesDisplayMode, renderProjectNotesEditMode,
   renderSessionNotesBar, renderSessionNotesEditMode,
-  toggleSessionFavorite, saveSessionNotes, setProjectNoteFields,
+  toggleSessionFavorite, saveSessionNotes, startInlineRename, setProjectNoteFields,
 } from './shell/notes.js';
 import {
   refreshMachinesList, renderMachinePickerList, renderMachineMenuList,
@@ -150,23 +151,28 @@ export function initShell(opts = {}) {
     void sidebarView.value;
     void activityLoading.value;
     void activityHits.value;
+    void sessionMetaMap.value;
     const el = $('session-list');
     if (!el) return;
+    // Keep inline rename input mounted until blur/Enter
+    if (el.querySelector('.session-rename-input')) return;
     el.innerHTML = renderSessionList();
     syncSidebarChrome();
   });
 
-  // Only paint calendar when welcome is actually visible (never during boot-restore)
+  // Home calendar: full session list (not sidebar time-range / 120-cap filters)
   effect(() => {
-    const sessions = filteredSessions.value;
+    // Subscribe to raw list + agent/machine filters
+    void sessionsData.value;
+    void agentFilter.value;
+    void selectedMachineId.value;
+    void hubMode.value;
     const welcome = $('welcome');
     if (!welcome) return;
     if (document.documentElement.classList.contains('boot-restore')) return;
     if (document.documentElement.classList.contains('boot-pending')) return;
     if (welcome.classList.contains('hidden') || welcome.style.display === 'none') return;
-    // Avoid painting empty calendar then repainting — wait until we have data or settled home
-    if (!Array.isArray(sessions)) return;
-    updateDashboard(sessions);
+    updateDashboard();
   });
 
   watch(sessionFilter, f => {
@@ -289,19 +295,22 @@ export function initShell(opts = {}) {
 
   delegate.on('click', '#btn-cal-prev', () => {
     shiftCalMonth(-1);
-    updateDashboard(sessionsData.peek());
+    updateDashboard(getDashboardSessions());
   });
   delegate.on('click', '#btn-cal-next', () => {
     shiftCalMonth(1);
-    updateDashboard(sessionsData.peek());
+    updateDashboard(getDashboardSessions());
   });
   delegate.on('click', '[data-cal-date]', (_, el) => {
     setSelectedCalDate(el.dataset.calDate);
-    updateDashboard(sessionsData.peek());
+    updateDashboard(getDashboardSessions());
   });
 
   delegate.on('click', '[data-session-id]', (e, el) => {
     if (e.target.closest('[data-fav-toggle]')) return;
+    if (e.target.closest('[data-rename-session]')) return;
+    if (e.target.closest('.session-rename-input')) return;
+    if (e.target.closest('.session-title-wrap.session-rename-active')) return;
     resumeSession(
       el.dataset.sessionId,
       el.dataset.sessionCwd || null,
@@ -310,6 +319,34 @@ export function initShell(opts = {}) {
       el.dataset.sessionMachine || null,
     );
     closeSidebarOnMobile();
+  });
+  // Inline rename (sidebar): click title or ✎ — no dialog
+  delegate.on('click', '[data-rename-session]', (e, el) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const wrap = el.closest('.session-title-wrap') || el;
+    const sessionId = wrap.dataset.renameSessionId || wrap.dataset.sessionId;
+    if (!sessionId) return;
+    startInlineRename({
+      sessionId,
+      agent: wrap.dataset.renameSessionAgent || 'claude',
+      machineId: wrap.dataset.renameSessionMachine || null,
+      fallbackDisplay: wrap.dataset.renameSessionDisplay || '',
+      mountEl: wrap,
+    });
+  });
+  // Inline rename (session bar title)
+  delegate.on('click', '[data-rename-bar], #session-title-display', (e, el) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!ctx.sessionId) return;
+    const mountEl = el.id === 'session-title-display' ? el : (el.closest('#session-title-display') || el);
+    startInlineRename({
+      sessionId: ctx.sessionId,
+      agent: ctx.agent || currentAgent.peek() || 'claude',
+      machineId: ctx.machineId || null,
+      mountEl,
+    });
   });
 
   delegate.on('click', '[data-folder]', (_, el) => {
@@ -364,7 +401,7 @@ export function initShell(opts = {}) {
     if (prev !== next) {
       ctx.sessionId = null;
       setAgent(next);
-      currentModel.value = AGENT_DEFAULT_MODEL[next] || currentModel.peek();
+      currentModel.value = getDefaultModel(next) || currentModel.peek();
       localStorage.setItem('model', currentModel.peek());
       refreshModelSelect();
       appendSystemMsg(`Agent → ${AGENT_LABELS[next] || next} · model ${currentModel.peek()} · new session`);
@@ -400,7 +437,10 @@ export function initShell(opts = {}) {
   delegate.on('change', '#sel-model', (_, el) => {
     currentModel.value = el.value;
     localStorage.setItem('model', el.value);
+    refreshEffortSelect();
   });
+  delegate.on('click', '#btn-model-add', () => promptCustomModel({ editCurrent: false }));
+  delegate.on('click', '#btn-model-edit', () => promptCustomModel({ editCurrent: true }));
   delegate.on('change', '#sel-effort', (_, el) => { currentEffort.value = el.value; });
   delegate.on('change', '#sel-permission', (_, el) => { currentPermission.value = el.value; });
   delegate.on('change', '#sel-density', (_, el) => {

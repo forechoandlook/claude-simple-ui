@@ -4,7 +4,7 @@ import {
   workspacesData, sessionFilter, filesPath, viewingFile, currentProject,
   filesRoot, gitRoot, currentModel, currentAgent, setAgent,
   hubMode, machinesList, selectedMachineId, setSelectedMachine,
-  AGENT_DEFAULT_MODEL, AGENT_LABELS, ctx,
+  getDefaultModel, AGENT_LABELS, ctx,
 } from '../state.js';
 // filesRoot/gitRoot used when starting a new session (default paths)
 import { api } from '../api.js';
@@ -166,7 +166,7 @@ export async function startNewSession() {
     ctx.configDir = configDir || null;
     ctx.agent = agent;
     setAgent(agent);
-    currentModel.value = AGENT_DEFAULT_MODEL[agent] || currentModel.peek();
+    currentModel.value = getDefaultModel(agent) || currentModel.peek();
     localStorage.setItem('model', currentModel.peek());
     refreshModelSelect();
     batch(() => {

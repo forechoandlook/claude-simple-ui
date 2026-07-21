@@ -224,12 +224,16 @@ export const AppShell = (opts = {}) => {
                   <option value="codex">Convert to Codex</option>
                   <option value="grok">Convert to Grok</option>
                 </select>
-                <select id="sel-model" class="select select-xs select-bordered font-mono text-xs" title="Model">
-                  <option value="claude-sonnet-4-5">sonnet-4-5</option>
-                  <option value="claude-sonnet-4-6">sonnet-4-6</option>
-                  <option value="claude-opus-4-5">opus-4-5</option>
-                  <option value="claude-haiku-4-5">haiku-4-5</option>
-                </select>
+                <div class="flex items-center gap-0.5">
+                  <select id="sel-model" class="select select-xs select-bordered font-mono text-xs max-w-[11rem]" title="Model">
+                    <option value="claude-sonnet-4-5">sonnet-4-5</option>
+                    <option value="claude-sonnet-4-6">sonnet-4-6</option>
+                    <option value="claude-opus-4-5">opus-4-5</option>
+                    <option value="claude-haiku-4-5">haiku-4-5</option>
+                  </select>
+                  <button type="button" id="btn-model-add" class="btn btn-ghost btn-xs px-1.5 font-mono" title="Add / set custom model id">+</button>
+                  <button type="button" id="btn-model-edit" class="btn btn-ghost btn-xs px-1.5" title="Edit current model id">✎</button>
+                </div>
                 <select id="sel-effort" class="select select-xs select-bordered text-xs" title="Effort">
                   <option value="">effort: off</option>
                   <option value="low">low</option>
