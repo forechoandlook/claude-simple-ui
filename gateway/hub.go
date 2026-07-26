@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+// mime.TypeByExtension falls back to the OS mime registry (/etc/mime.types),
+// which is missing on minimal Linux images — that made .css/.js serve as
+// text/plain and get MIME-blocked by strict browser checks.
+var staticContentTypes = map[string]string{
+	".css":  "text/css; charset=utf-8",
+	".js":   "application/javascript; charset=utf-8",
+	".mjs":  "application/javascript; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".svg":  "image/svg+xml",
+}
+
 // Hub-mode API: one WebUI, many edge machines.
 
 // Paths that the hub answers itself (not proxied to a single machine).
@@ -370,6 +382,9 @@ func (g *gateway) handleStatic(w http.ResponseWriter, r *http.Request) {
 		// try index
 		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
 		return
+	}
+	if ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(full))]; ok {
+		w.Header().Set("Content-Type", ct)
 	}
 	http.ServeFile(w, r, full)
 }

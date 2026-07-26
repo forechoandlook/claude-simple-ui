@@ -1069,7 +1069,19 @@ export function initMetaAgent() {
   });
 
   // bootstrap: empty chat (last session restored on openMetaAgent)
+  // History/config fetch is deferred to loadMetaAgentBoot() — called once hub
+  // status + selected machine are known (boot.js / hub.js), not here: at this
+  // point probeHub() hasn't resolved yet, so hubMode always reads as false.
   loadSession(null, { silent: true });
+}
+
+/**
+ * Meta-agent history + AI config are machine-scoped in hub mode — skip until
+ * a machine is selected (called again from enterMachine() once one is).
+ */
+export function loadMetaAgentBoot() {
+  if (!ctx.token) return;
+  if (hubMode.peek() && !currentMachineId()) return;
   refreshHistoryCache();
   api('GET', '/api/ai/config').then(scheduleAutoReport).catch(() => {});
 }

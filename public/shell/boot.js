@@ -8,6 +8,7 @@ import { getCachedSessions } from '../cache.js';
 import { getLastSessionContext } from './session-context.js';
 import { loadAllSessions, loadWorkspaces, loadAgentsMeta } from './session-list.js';
 import { loadSessionMetaMap } from './notes.js';
+import { loadMetaAgentBoot } from '../agent-panel.js';
 import { resumeSession } from './session-nav.js';
 import {
   refreshMachinesList, hideMachinePicker, showMachinePicker,
@@ -59,6 +60,7 @@ export async function showApp(opts = {}) {
       setSelectedMachine(remembered);
       hideMachinePicker();
       hubMachineReady.value = true;
+      loadMetaAgentBoot();
     }
 
     // Machines list: refresh in background; only block picker if no remembered id
@@ -128,6 +130,7 @@ export async function showApp(opts = {}) {
   }
 
   // Standalone: cache-first sessions + live model lists, then deep link
+  loadMetaAgentBoot();
   const dataP = Promise.all([
     loadAllSessions({ waitFresh: false }),
     loadWorkspaces({ waitFresh: false }),

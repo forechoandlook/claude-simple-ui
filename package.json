@@ -1,9 +1,22 @@
 {
   "name": "claude-simple",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
+  "bin": {
+    "claude-simple": "server.js",
+    "claude-simple-client": "client.js"
+  },
+  "files": [
+    "server.js",
+    "client.js",
+    "gateway.js",
+    "src",
+    "dist",
+    "public"
+  ],
   "scripts": {
     "build": "node build.mjs",
+    "prepublishOnly": "node build.mjs",
     "start": "NODE_ENV=production node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
     "serve": "node server.js",

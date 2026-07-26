@@ -5,8 +5,9 @@ import {
   currentProject, sessionFilter, viewingFile, ctx,
 } from '../state.js';
 import { api, probeHub } from '../api.js';
-import { loadAllSessions, loadWorkspaces } from './session-list.js';
+import { loadAllSessions, loadWorkspaces, loadAgentsMeta } from './session-list.js';
 import { loadSessionMetaMap } from './notes.js';
+import { loadMetaAgentBoot } from '../agent-panel.js';
 // goHome imported dynamically in enterMachine to avoid circular deps
 
 export async function refreshMachinesList() {
@@ -186,7 +187,8 @@ export async function enterMachine(machineId, { forceReload = false } = {}) {
     bar.textContent = `Machine · ${machineId}`;
   }
 
-  await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap()]);
+  loadMetaAgentBoot();
+  await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap(), loadAgentsMeta().catch(() => {})]);
   hubMachineReady.value = true;
 }
 
