@@ -13,6 +13,8 @@ export const viewingFile    = signal(null);       // currently viewing file in F
 export const currentProject = signal(null);   // { id, name, path } | null
 export const currentTab     = signal('chat');
 export const isProcessing   = signal(false);
+/** Chat socket: idle | connecting | open | reconnecting | offline */
+export const wsStatus       = signal('idle');
 export const currentAgent      = signal(localStorage.getItem('agent') || 'claude'); // 'claude'|'codex'|'grok'
 export const currentModel      = signal(localStorage.getItem('model') || 'claude-sonnet-4-5');
 export const currentEffort     = signal('');
@@ -27,10 +29,12 @@ export const agentFilter    = signal(localStorage.getItem('agentFilter') || 'all
 export const timeRange      = signal(localStorage.getItem('timeRange') || '14'); // '0'|'1'|'7'|'14'|'30'
 export const activityHits   = signal(null); // null | { q, results, loading, error }
 export const activityLoading = signal(false);
-/** agent:sessionId → { favorite, notes, title, updatedAt }  (title = rename map) */
+/** agent:sessionId → { favorite, notes, title, hidden, updatedAt }  (title = rename map) */
 export const sessionMetaMap = signal({});
 /** Sidebar: show only favorited sessions */
 export const favoritesOnly  = signal(localStorage.getItem('favoritesOnly') === '1');
+/** Sidebar: show only hidden sessions (default list excludes hidden) */
+export const showHiddenOnly = signal(localStorage.getItem('showHiddenOnly') === '1');
 /** Sessions with this many user turns or fewer get a “thin” badge */
 export const LOW_TURN_THRESHOLD = 2;
 
@@ -77,7 +81,7 @@ export function metaKey(agent, sessionId, machineId) {
 
 export function getSessionMeta(agent, sessionId, machineId) {
   const m = sessionMetaMap.peek()?.[metaKey(agent, sessionId, machineId)];
-  return m || { favorite: false, notes: '', title: '' };
+  return m || { favorite: false, notes: '', title: '', hidden: false };
 }
 
 /** Display title: user rename map → original display → short id. */
@@ -295,6 +299,7 @@ export const filteredSessions = computed(() => {
   const aFilter = agentFilter.value;
   const days = timeRange.value;
   const favOnly = favoritesOnly.value;
+  const hiddenOnly = showHiddenOnly.value;
   const metaMap = sessionMetaMap.value;
   // When deep activity results are present and user is searching, prefer those
   const hits = activityHits.value;
@@ -309,6 +314,12 @@ export const filteredSessions = computed(() => {
     list = list.filter(s => s && (!s.machineId || s.machineId === mid));
   }
   list = list.filter(s => s && matchesAgentFilter(s, aFilter) && matchesTimeRange(s, days));
+  // Hidden sessions: excluded by default; "Hidden" filter shows only them
+  if (hiddenOnly) {
+    list = list.filter(s => s && metaMap?.[metaKey(s.agent, s.sessionId, s.machineId)]?.hidden);
+  } else {
+    list = list.filter(s => s && !metaMap?.[metaKey(s.agent, s.sessionId, s.machineId)]?.hidden);
+  }
   if (favOnly) {
     list = list.filter(s => s && metaMap?.[metaKey(s.agent, s.sessionId, s.machineId)]?.favorite);
   }

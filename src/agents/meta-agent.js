@@ -427,6 +427,38 @@ export function createMetaAgent(deps) {
   const VLM_THREAD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7d on disk
   const ANON_SESSION_ID = '_anonymous';
 
+  /** run_command approval gate: id → { resolve } (see requestApproval/resolveApproval) */
+  const pendingApprovals = new Map();
+  const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+
+  /** Ask the caller (via onApproval) to confirm a sensitive tool call; auto-denies if unattended or timed out. */
+  function requestApproval(onApproval, name, args) {
+    if (typeof onApproval !== 'function') return Promise.resolve(false);
+    const id = crypto.randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingApprovals.delete(id);
+        resolve(false);
+      }, APPROVAL_TIMEOUT_MS);
+      pendingApprovals.set(id, {
+        resolve: (approved) => {
+          clearTimeout(timer);
+          pendingApprovals.delete(id);
+          resolve(!!approved);
+        },
+      });
+      onApproval({ id, name, args });
+    });
+  }
+
+  /** Called from the /api/ai/approve endpoint when the user responds. */
+  function resolveApproval(id, approved) {
+    const pending = pendingApprovals.get(id);
+    if (!pending) return false;
+    pending.resolve(approved);
+    return true;
+  }
+
   let configCache = null;
   let reportsCache = null;
   /** @type {{ version: number, sessions: Array<{id,title,createdAt,updatedAt,messageCount}> } | null} */
@@ -1716,7 +1748,7 @@ export function createMetaAgent(deps) {
   /**
    * Tool-enabled agent loop with streaming content callbacks.
    */
-  async function runLoop(messages, { onContent, onTool, cfg, chatSessionId } = {}) {
+  async function runLoop(messages, { onContent, onTool, onApproval, cfg, chatSessionId } = {}) {
     const config = cfg || await loadConfig();
     if (!config.key) throw new Error('AI API Key 未配置，请在 ⚙️ → Meta Agent 中填写');
 
@@ -1785,6 +1817,12 @@ export function createMetaAgent(deps) {
         onTool?.(call.function.name, a, 'start', null, callId);
         let result;
         try {
+          if (call.function.name === 'run_command') {
+            const approved = await requestApproval(onApproval, call.function.name, a);
+            if (!approved) {
+              throw new Error('command rejected: user did not approve execution');
+            }
+          }
           result = await executeTool(call.function.name, a, toolCtx);
           if (MUTATING.has(call.function.name)) needsMutate = true;
           onTool?.(call.function.name, a, 'done', result, callId);
@@ -1939,6 +1977,7 @@ export function createMetaAgent(deps) {
     buildDigest,
     executeTool,
     runLoop,
+    resolveApproval,
     generateReport,
     listChatSessions,
     getChatSession,

@@ -10,6 +10,7 @@ import { initTerminal } from './terminal.js';
 import { initImagePaste } from './chat.js';
 import { initMetaAgent } from './agent-panel.js';
 import { initRouter, applyInitialRoute, parseHashPath } from './router.js';
+import { initPwa } from './pwa.js';
 
 function markBootReady() {
   const root = document.documentElement;
@@ -93,3 +94,6 @@ initRouter(resumeSession, switchTab);
 document.addEventListener('router:home', () => {
   clearBootRestore();
 });
+
+// PWA: register SW (static cache only; never touches chat WS)
+initPwa();

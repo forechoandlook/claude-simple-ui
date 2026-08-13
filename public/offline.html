@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0f172a">
+  <title>离线 · Agent UI</title>
+  <style>
+    body {
+      margin: 0; min-height: 100dvh; display: flex; align-items: center; justify-content: center;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f172a; color: #e2e8f0; padding: 1.5rem; text-align: center;
+    }
+    .card {
+      max-width: 22rem; padding: 1.5rem; border-radius: 1rem;
+      background: #1e293b; border: 1px solid #334155;
+    }
+    h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
+    p { font-size: .9rem; color: #94a3b8; line-height: 1.5; margin: 0 0 1rem; }
+    button {
+      appearance: none; border: 0; border-radius: .5rem; padding: .55rem 1rem;
+      background: #6366f1; color: #fff; font-weight: 600; font-size: .875rem; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>当前无网络</h1>
+    <p>Agent UI 需要连接 Hub 才能聊天。恢复网络后点下方按钮重试。</p>
+    <button type="button" onclick="location.href='/'">重新加载</button>
+  </div>
+</body>
+</html>

@@ -100,7 +100,7 @@ export function runCodex(command, options, send, { cliPath, activeSessions }) {
       return;
     }
 
-    const entry = { kind: 'codex', child, startTime: Date.now() };
+    const entry = { kind: 'codex', child, startTime: Date.now(), busy: true, key: sessionKey, sessionId: options.sessionId || null };
     activeSessions.set(sessionKey, entry);
     // Also register under thread id once known so abort-session works
     let threadId = options.sessionId || null;

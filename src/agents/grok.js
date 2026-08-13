@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import readline from 'readline';
 import crypto from 'crypto';
+import { createDeltaBatcher } from './stream-batch.js';
 
 /**
  * Run Grok CLI headlessly with streaming-json over WebSocket (not HTTP SSE).
@@ -89,7 +90,7 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
     // Unbuffer stdout as much as possible
     if (child.stdout?.setEncoding) child.stdout.setEncoding('utf8');
 
-    const entry = { kind: 'grok', child, startTime: Date.now() };
+    const entry = { kind: 'grok', child, startTime: Date.now(), busy: true, key: sessionKey, sessionId: options.sessionId || null };
     activeSessions.set(sessionKey, entry);
 
     let sessionId = options.sessionId || null;
@@ -101,9 +102,8 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
     let textChars = 0;
     let thoughtChars = 0;
 
-    // Throttle thought deltas a bit (they're very chatty) but keep text live
-    let thoughtBuf = '';
-    let thoughtTimer = null;
+    const textBatch = createDeltaBatcher(send, 'assistant_delta', { agent: 'grok' }, { maxWait: 48, maxSize: 480 });
+    const thoughtBatch = createDeltaBatcher(send, 'thought_delta', { agent: 'grok' }, { maxWait: 140, maxSize: 600 });
 
     child.stderr.on('data', d => { stderr += d.toString(); });
 
@@ -118,36 +118,27 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
     }
 
     function endStream() {
+      textBatch.flush();
       if (streamOpen) {
         send({ type: 'assistant_stream_end', agent: 'grok' });
         streamOpen = false;
       }
     }
 
-    function flushThought(force = false) {
-      if (!thoughtBuf) return;
-      if (!force && thoughtBuf.length < 24) return;
+    function flushThought() {
+      if (!thoughtBatch.pending()) return;
       if (!thoughtOpen) {
         send({ type: 'thought_stream_start', agent: 'grok' });
         thoughtOpen = true;
       }
-      send({ type: 'thought_delta', data: thoughtBuf, agent: 'grok' });
-      thoughtChars += thoughtBuf.length;
-      thoughtBuf = '';
-    }
-
-    function scheduleThoughtFlush() {
-      if (thoughtTimer) return;
-      thoughtTimer = setTimeout(() => {
-        thoughtTimer = null;
-        flushThought(true);
-      }, 120);
+      const n = thoughtBatch.pending();
+      thoughtBatch.flush();
+      thoughtChars += n;
     }
 
     function emitTool(raw) {
       // Finalize any open text/thought before tool card
-      if (thoughtTimer) { clearTimeout(thoughtTimer); thoughtTimer = null; }
-      flushThought(true);
+      flushThought();
       if (thoughtOpen) {
         send({ type: 'thought_stream_end', agent: 'grok' });
         thoughtOpen = false;
@@ -179,10 +170,9 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
 
       const t = String(raw.type || '').toLowerCase();
 
-      // ── Text tokens (stream immediately) ─────────────────────────────────
+      // ── Text tokens (batched ~50ms) ──────────────────────────────────────
       if ((t === 'text' || t === 'message' || t === 'output_text') && raw.data != null) {
-        if (thoughtTimer) { clearTimeout(thoughtTimer); thoughtTimer = null; }
-        flushThought(true);
+        flushThought();
         if (thoughtOpen) {
           send({ type: 'thought_stream_end', agent: 'grok' });
           thoughtOpen = false;
@@ -191,14 +181,17 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
         if (!chunk) return;
         ensureStream();
         textChars += chunk.length;
-        send({ type: 'assistant_delta', data: chunk, agent: 'grok' });
+        textBatch.push(chunk);
         return;
       }
 
-      // ── Thinking tokens (throttled stream) ───────────────────────────────
+      // ── Thinking tokens (batched stream) ────────────────────────────────
       if ((t === 'thought' || t === 'thinking' || t === 'reasoning') && raw.data != null) {
-        thoughtBuf += String(raw.data);
-        scheduleThoughtFlush();
+        if (!thoughtOpen) {
+          send({ type: 'thought_stream_start', agent: 'grok' });
+          thoughtOpen = true;
+        }
+        thoughtBatch.push(String(raw.data));
         return;
       }
 
@@ -219,6 +212,7 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
       // ── Session id early (some builds emit before end) ───────────────────
       if ((t === 'session' || t === 'session_started') && (raw.sessionId || raw.session_id)) {
         sessionId = raw.sessionId || raw.session_id;
+        entry.sessionId = sessionId;
         activeSessions.set(sessionId, entry);
         if (!options.sessionId) {
           send({ type: 'session-created', sessionId, agent: 'grok' });
@@ -229,8 +223,7 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
       // ── End of turn ─────────────────────────────────────────────────────
       if (t === 'end' || t === 'result' || t === 'done') {
         gotEnd = true;
-        if (thoughtTimer) { clearTimeout(thoughtTimer); thoughtTimer = null; }
-        flushThought(true);
+        flushThought();
         if (thoughtOpen) {
           send({ type: 'thought_stream_end', agent: 'grok' });
           thoughtOpen = false;
@@ -239,17 +232,22 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
 
         if (raw.sessionId || raw.session_id) {
           sessionId = raw.sessionId || raw.session_id;
+          entry.sessionId = sessionId;
           activeSessions.set(sessionId, entry);
           if (!options.sessionId) {
             send({ type: 'session-created', sessionId, agent: 'grok' });
           }
         }
 
+        // Unlock UI immediately — process may linger after the turn ends.
+        entry.busy = false;
+
         const u = raw.usage || {};
         const costTicks = raw.total_cost_usd_ticks ?? u.cost_usd_ticks ?? u.costUsdTicks;
         const costUSD = raw.total_cost_usd ?? u.cost_usd ?? u.costUSD
           ?? (typeof costTicks === 'number' ? costTicks / 1e10 : undefined);
 
+        const sid = sessionId || sessionKey;
         send({
           type: 'result',
           is_error: false,
@@ -262,26 +260,35 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
             reasoningTokens: u.reasoning_tokens || u.reasoningTokens || 0,
             costUSD,
           },
-          sessionId: sessionId || sessionKey,
+          sessionId: sid,
           agent: 'grok',
           stats: { textChars, thoughtChars },
         });
+        // Early complete so client can send next turn without waiting for process exit.
+        send({ type: 'complete', exitCode: 0, sessionId: sid, agent: 'grok' });
         return;
       }
 
       if (t === 'error') {
+        entry.busy = false;
         send({ type: 'error', message: raw.message || raw.data || 'grok error', agent: 'grok' });
       }
     });
 
     child.on('close', (code) => {
-      if (thoughtTimer) { clearTimeout(thoughtTimer); thoughtTimer = null; }
-      flushThought(true);
+      flushThought();
       if (thoughtOpen) send({ type: 'thought_stream_end', agent: 'grok' });
       endStream();
       rl.close();
+      entry.busy = false;
       activeSessions.delete(sessionKey);
       if (sessionId) activeSessions.delete(sessionId);
+
+      // Skip duplicate complete if turn already finished via streaming-json "end".
+      if (gotEnd && !aborted) {
+        resolve();
+        return;
+      }
 
       if (aborted) {
         send({ type: 'complete', exitCode: 130, aborted: true, sessionId: sessionId || sessionKey, agent: 'grok' });
@@ -300,6 +307,7 @@ export function runGrok(command, options, send, { cliPath, activeSessions }) {
     });
 
     child.on('error', (e) => {
+      entry.busy = false;
       activeSessions.delete(sessionKey);
       if (sessionId) activeSessions.delete(sessionId);
       send({ type: 'error', message: e.message, agent: 'grok' });

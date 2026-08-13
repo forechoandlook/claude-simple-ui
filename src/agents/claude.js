@@ -9,7 +9,9 @@ import crypto from 'crypto';
 export async function runClaude(command, options, send, { cliPath, activeSessions }) {
   const sessionKey = options.sessionId || crypto.randomUUID();
   const controller = new AbortController();
-  activeSessions.set(sessionKey, { controller, kind: 'claude', startTime: Date.now() });
+  activeSessions.set(sessionKey, {
+    controller, kind: 'claude', startTime: Date.now(), busy: true, key: sessionKey, sessionId: options.sessionId || null,
+  });
 
   const env = { ...process.env };
   if (options.configDir) env.CLAUDE_CONFIG_DIR = options.configDir;
@@ -41,6 +43,8 @@ export async function runClaude(command, options, send, { cliPath, activeSession
     for await (const msg of stream) {
       if (msg.type === 'system' && msg.session_id && !capturedSessionId) {
         capturedSessionId = msg.session_id;
+        const ent = activeSessions.get(sessionKey);
+        if (ent) { ent.sessionId = capturedSessionId; activeSessions.set(capturedSessionId, ent); }
         send({ type: 'session-created', sessionId: capturedSessionId, agent: 'claude' });
       }
       send(msg);
@@ -53,6 +57,9 @@ export async function runClaude(command, options, send, { cliPath, activeSession
       send({ type: 'error', message: err.message, agent: 'claude' });
     }
   } finally {
+    const ent = activeSessions.get(sessionKey);
+    if (ent) ent.busy = false;
     activeSessions.delete(sessionKey);
+    if (capturedSessionId) activeSessions.delete(capturedSessionId);
   }
 }

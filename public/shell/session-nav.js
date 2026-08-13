@@ -217,8 +217,13 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
     }
     appendSystemMsg(`Loading ${label} history…`);
     try {
-      // tail=120 → server returns only recent messages (much faster on long sessions)
-      const q = new URLSearchParams({ agent: resolvedAgent, tail: '120' });
+      // Smaller tail + compact tool payloads on mobile / Save-Data.
+      const saveData = typeof navigator !== 'undefined' && (
+        navigator.connection?.saveData
+        || /Mobi|Android|iPhone/i.test(navigator.userAgent || '')
+      );
+      const tail = saveData ? '50' : '80';
+      const q = new URLSearchParams({ agent: resolvedAgent, tail, compact: '1' });
       const data = await api('GET', `/api/sessions/${sid}/messages?${q}`);
       const msgs = Array.isArray(data) ? data : (data.messages || []);
       const context = Array.isArray(data) ? null : (data.context || null);

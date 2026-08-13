@@ -11,14 +11,21 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 OUT     := dist
 
-.PHONY: all build run tidy clean linux-amd64 linux-arm64 darwin-arm64 darwin-amd64 release
+.PHONY: all build run tidy clean prepare-web linux-amd64 linux-arm64 darwin-arm64 darwin-amd64 release
 
 all: build
 
 tidy:
 	go mod tidy
 
-build: tidy
+# go:embed cannot address files outside the Go package.  Mirror the WebUI into
+# the ignored gateway/web directory immediately before compiling it.
+prepare-web:
+	mkdir -p web
+	find web -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
+	cp -R ../public/. web/
+
+build: prepare-web tidy
 	mkdir -p $(OUT)
 	CGO_ENABLED=0 go build -ldflags '$(LDFLAGS)' -o $(OUT)/$(APP) .
 
@@ -26,19 +33,19 @@ run:
 	@test -n "$$MACHINE_TOKEN" || (echo "MACHINE_TOKEN is required" && exit 1)
 	go run . 
 
-linux-amd64: tidy
+linux-amd64: prepare-web tidy
 	mkdir -p $(OUT)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o $(OUT)/$(APP)-linux-amd64 .
 
-linux-arm64: tidy
+linux-arm64: prepare-web tidy
 	mkdir -p $(OUT)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags '$(LDFLAGS)' -o $(OUT)/$(APP)-linux-arm64 .
 
-darwin-arm64: tidy
+darwin-arm64: prepare-web tidy
 	mkdir -p $(OUT)
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags '$(LDFLAGS)' -o $(OUT)/$(APP)-darwin-arm64 .
 
-darwin-amd64: tidy
+darwin-amd64: prepare-web tidy
 	mkdir -p $(OUT)
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o $(OUT)/$(APP)-darwin-amd64 .
 

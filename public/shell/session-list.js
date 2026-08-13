@@ -10,7 +10,7 @@ import {
   getModelsForAgent, getDefaultModel, getEffortsForModel,
   addCustomModel, removeCustomModel, getCustomModels, ctx,
 } from '../state.js';
-import { api } from '../api.js';
+import { api, NOT_MODIFIED } from '../api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from '../cache.js';
 import { formatTime, agentBadge, agentCountPills, shortPath } from './util.js';
 
@@ -20,6 +20,16 @@ function normalizeSessions(v) {
   if (v && Array.isArray(v.results)) return v.results;
   if (v && Array.isArray(v.sessions)) return v.sessions;
   return [];
+}
+
+function sessionsQuery() {
+  const days = parseInt(timeRange.peek() || '14', 10);
+  const q = new URLSearchParams();
+  // Match sidebar time filter so we don't pull years of metadata on mobile.
+  if (days > 0) q.set('days', String(days));
+  q.set('limit', '400');
+  const s = q.toString();
+  return s ? `/api/sessions?${s}` : '/api/sessions';
 }
 
 /** @param {{ waitFresh?: boolean }} opts waitFresh=false → paint cache first, refresh in bg */
@@ -37,10 +47,13 @@ export async function loadAllSessions({ waitFresh = true } = {}) {
   }
 
   const fetchFresh = async () => {
-    const fresh = normalizeSessions(await api('GET', '/api/sessions'));
-    sessionsData.value = fresh;
-    setCachedSessions(fresh);
-    return fresh;
+    const path = sessionsQuery();
+    const fresh = await api('GET', path, undefined, undefined, { etag: true });
+    if (fresh === NOT_MODIFIED) return sessionsData.peek();
+    const list = normalizeSessions(fresh);
+    sessionsData.value = list;
+    setCachedSessions(list);
+    return list;
   };
 
   if (waitFresh || !cached.length) {
@@ -79,6 +92,7 @@ export function sessionItemHtml(s, { showProject = false } = {}) {
     ? s.snippet
     : sessionDisplayTitle(s);
   const fav = !!meta.favorite;
+  const hid = !!meta.hidden;
   const hasNote = !!(meta.notes && String(meta.notes).trim());
   const turns = Number(s.turnCount) || 0;
   const thin = turns > 0 && turns <= LOW_TURN_THRESHOLD;
@@ -87,7 +101,8 @@ export function sessionItemHtml(s, { showProject = false } = {}) {
     : '';
   const badges = [
     thin ? `<span class="session-thin-badge" title="Only ${turns} turn${turns === 1 ? '' : 's'}">thin·${turns}</span>` : '',
-    renamed ? `<span class="session-renamed-badge" title="Custom name (original: ${esc(s.display || '')})">✎</span>` : '',
+    renamed ? `<span class="session-renamed-badge" title="Custom name (original: ${esc(s.display || '')})">renamed</span>` : '',
+    hid ? `<span class="session-hidden-badge" title="Hidden">hidden</span>` : '',
     hasNote ? `<span class="session-note-dot" title="${esc(meta.notes)}">📝</span>` : '',
   ].filter(Boolean).join('');
   const machineBadge = s.machineId
@@ -97,7 +112,7 @@ export function sessionItemHtml(s, { showProject = false } = {}) {
     ? `${title}\n(original: ${s.display || s.sessionId})`
     : (s.display || '');
   return `<div class="session-row px-2.5 py-1.5 cursor-pointer hover:bg-base-300 border-l-2
-              ${active ? 'border-primary bg-primary/5' : 'border-transparent'} ${fav ? 'session-fav' : ''} ${thin ? 'session-thin' : ''}"
+              ${active ? 'border-primary bg-primary/5' : 'border-transparent'} ${fav ? 'session-fav' : ''} ${hid ? 'session-hidden-row' : ''} ${thin ? 'session-thin' : ''}"
        data-session-id="${esc(s.sessionId)}"
        data-session-cwd="${esc(s.cwd || '')}"
        data-session-config-dir="${esc(s.configDir || '')}"
@@ -114,17 +129,21 @@ export function sessionItemHtml(s, { showProject = false } = {}) {
       ${agentBadge(s.agent)}
       <div class="min-w-0 flex-1">
         <div class="session-title-wrap flex items-center gap-1 min-w-0"
-             data-session-id="${esc(s.sessionId)}"
              data-rename-session-id="${esc(s.sessionId)}"
              data-rename-session-agent="${esc(s.agent || 'claude')}"
              data-rename-session-machine="${esc(s.machineId || '')}"
              data-rename-session-display="${esc(s.display || '')}">
           <div class="session-title-text text-[11px] leading-snug truncate flex-1 min-w-0 ${active ? 'text-primary font-medium' : 'text-base-content/85'} ${renamed ? 'session-title-renamed' : ''}"
-               data-rename-session="1"
-               title="${esc(tip)} · click to rename">${esc(title)}</div>
+               title="${esc(tip)}">${esc(title)}</div>
           <button type="button" class="session-rename-btn flex-shrink-0"
                   data-rename-session="1"
                   title="Rename session">✎</button>
+          <button type="button" class="session-hide-btn flex-shrink-0 ${hid ? 'is-hidden' : ''}"
+                  data-hide-toggle="1"
+                  data-hide-session-id="${esc(s.sessionId)}"
+                  data-hide-session-agent="${esc(s.agent || 'claude')}"
+                  data-hide-session-machine="${esc(s.machineId || '')}"
+                  title="${hid ? 'Unhide session' : 'Hide session'}">${hid ? '👁' : '🙈'}</button>
         </div>
         ${projectLine}
         ${badges || machineBadge ? `<div class="flex items-center gap-1 mt-0.5 flex-wrap">${machineBadge}${badges}</div>` : ''}

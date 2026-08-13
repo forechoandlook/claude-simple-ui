@@ -1,5 +1,5 @@
 // git.js — Git tab
-import { signal, effect, delegate, esc, $ } from './lib.js';
+import { signal, asyncEffect, delegate, esc, $ } from './lib.js';
 import { currentProject, currentTab, gitRoot } from './state.js';
 import { api } from './api.js';
 
@@ -63,41 +63,45 @@ function renderDiff(diff) {
 
 export function initGitTab() {
   // Git status panel
-  effect(() => {
+  asyncEffect(async signal => {
     const tab  = currentTab.value;
     const proj = currentProject.value;
     const root = gitRoot.value || proj?.path;
     const area = $('git-area');
     if (!area) return;
-    const ctrl = new AbortController();
-    if (tab !== 'git') return () => ctrl.abort();
+    if (tab !== 'git') return;
     if (!root) {
       area.innerHTML = '<div class="p-4 text-sm text-base-content/50">Enter a project root above, or open a session with a working directory.</div>';
-      return () => ctrl.abort();
+      return;
     }
     const id = proj?.id || '_';
     area.innerHTML = '<div class="p-4 text-xs text-base-content/40">Loading…</div>';
-    api('GET', `/api/projects/${id}/git/status?root=${encodeURIComponent(root)}`, undefined, ctrl.signal)
-      .then(d => { if (!ctrl.signal.aborted) area.innerHTML = gitRenderer(d); })
-      .catch(e => { if (!ctrl.signal.aborted && e?.name !== 'AbortError')
-        area.innerHTML = `<div class="p-4 text-xs text-error">${esc(e?.message ?? String(e))}</div>`; });
-    return () => ctrl.abort();
+    try {
+      const data = await api('GET', `/api/projects/${id}/git/status?root=${encodeURIComponent(root)}`, undefined, signal);
+      if (!signal.aborted) area.innerHTML = gitRenderer(data);
+    } catch (e) {
+      if (!signal.aborted && e?.name !== 'AbortError') {
+        area.innerHTML = `<div class="p-4 text-xs text-error">${esc(e?.message ?? String(e))}</div>`;
+      }
+    }
   });
 
   // Diff panel
-  effect(() => {
+  asyncEffect(async signal => {
     const proj   = currentProject.value;
     const root   = gitRoot.value || proj?.path;
     const staged = diffStaged.value;
     const target = $('diff-content');
     if (!target || !root) return;
     const id   = proj?.id || '_';
-    const ctrl = new AbortController();
-    api('GET', `/api/projects/${id}/git/diff?root=${encodeURIComponent(root)}${staged ? '&staged=true' : ''}`, undefined, ctrl.signal)
-      .then(d => { if (!ctrl.signal.aborted) target.innerHTML = d?.diff ? renderDiff(d.diff) : '<span class="text-base-content/40">No changes</span>'; })
-      .catch(e => { if (!ctrl.signal.aborted && e?.name !== 'AbortError')
-        target.innerHTML = `<span class="text-error">${esc(e?.message ?? String(e))}</span>`; });
-    return () => ctrl.abort();
+    try {
+      const data = await api('GET', `/api/projects/${id}/git/diff?root=${encodeURIComponent(root)}${staged ? '&staged=true' : ''}`, undefined, signal);
+      if (!signal.aborted) target.innerHTML = data?.diff ? renderDiff(data.diff) : '<span class="text-base-content/40">No changes</span>';
+    } catch (e) {
+      if (!signal.aborted && e?.name !== 'AbortError') {
+        target.innerHTML = `<span class="text-error">${esc(e?.message ?? String(e))}</span>`;
+      }
+    }
   });
 
   delegate.on('click', '#diff-unstaged, #diff-staged', (_, el) => {

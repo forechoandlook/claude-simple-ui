@@ -35,6 +35,7 @@ function connect() {
   console.log(`[client] Connecting to gateway ${GATEWAY_URL} ...`);
   controlWs = new WebSocket(GATEWAY_URL, {
     headers: { 'x-machine-token': MACHINE_TOKEN },
+    perMessageDeflate: true,
   });
 
   controlWs.on('open', () => {
@@ -60,12 +61,35 @@ function connect() {
           headers: { ...msg.headers, host: `127.0.0.1:${LOCAL_PORT}` },
           body: msg.body || undefined,
         });
+        const headers = Object.fromEntries(res.headers.entries());
+        const contentType = res.headers.get('content-type') || '';
+
+        // SSE (and any other body-less-until-done response) is forwarded as
+        // it arrives instead of buffered in full, so remote/hub viewers get
+        // real-time streaming instead of one lump delivered at the end.
+        if (contentType.includes('text/event-stream') && res.body) {
+          sendControl({ type: 'http-res-start', reqId: msg.reqId, status: res.status, headers });
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            sendControl({ type: 'http-chunk', reqId: msg.reqId, data: decoder.decode(value, { stream: true }) });
+          }
+          // Flush a possibly incomplete UTF-8 code point held by TextDecoder
+          // before terminating the stream (SSE payloads often contain Chinese).
+          const tail = decoder.decode();
+          if (tail) sendControl({ type: 'http-chunk', reqId: msg.reqId, data: tail });
+          sendControl({ type: 'http-end', reqId: msg.reqId });
+          return;
+        }
+
         const body = await res.text();
         sendControl({
           type: 'http-res',
           reqId: msg.reqId,
           status: res.status,
-          headers: Object.fromEntries(res.headers.entries()),
+          headers,
           body,
         });
       } catch (e) {

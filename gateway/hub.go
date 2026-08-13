@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -17,12 +17,18 @@ import (
 // which is missing on minimal Linux images — that made .css/.js serve as
 // text/plain and get MIME-blocked by strict browser checks.
 var staticContentTypes = map[string]string{
-	".css":  "text/css; charset=utf-8",
-	".js":   "application/javascript; charset=utf-8",
-	".mjs":  "application/javascript; charset=utf-8",
-	".json": "application/json; charset=utf-8",
-	".html": "text/html; charset=utf-8",
-	".svg":  "image/svg+xml",
+	".css":          "text/css; charset=utf-8",
+	".js":           "application/javascript; charset=utf-8",
+	".mjs":          "application/javascript; charset=utf-8",
+	".json":         "application/json; charset=utf-8",
+	".webmanifest":  "application/manifest+json; charset=utf-8",
+	".html":         "text/html; charset=utf-8",
+	".svg":          "image/svg+xml",
+	".png":          "image/png",
+	".webp":         "image/webp",
+	".ico":          "image/x-icon",
+	".woff":         "font/woff",
+	".woff2":        "font/woff2",
 }
 
 // Hub-mode API: one WebUI, many edge machines.
@@ -317,76 +323,52 @@ func (g *gateway) handleProxiedAPI(w http.ResponseWriter, r *http.Request) {
 		headers[k] = vals[0]
 	}
 
-	res, err := g.forwardHTTP(machineID, r.Method, fwdPath, headers, bodyStr)
-	if err != nil {
+	if err := g.forwardHTTPStream(machineID, r.Method, fwdPath, headers, bodyStr, w); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
-		return
 	}
-	for k, v := range res.Headers {
-		lk := strings.ToLower(k)
-		if lk == "transfer-encoding" || lk == "connection" || lk == "keep-alive" {
-			continue
-		}
-		w.Header().Set(k, v)
-	}
-	status := res.Status
-	if status == 0 {
-		status = 200
-	}
-	w.WriteHeader(status)
-	_, _ = w.Write([]byte(res.Body))
-}
-
-func (g *gateway) publicDir() string {
-	if d := os.Getenv("PUBLIC_DIR"); d != "" {
-		return d
-	}
-	// default: ../public relative to cwd, or next to binary
-	candidates := []string{
-		"public",
-		"../public",
-		filepath.Join(filepath.Dir(os.Args[0]), "public"),
-		filepath.Join(filepath.Dir(os.Args[0]), "../public"),
-	}
-	for _, c := range candidates {
-		if st, err := os.Stat(c); err == nil && st.IsDir() {
-			abs, _ := filepath.Abs(c)
-			return abs
-		}
-	}
-	return ""
 }
 
 func (g *gateway) handleStatic(w http.ResponseWriter, r *http.Request) {
-	dir := g.publicDir()
-	if dir == "" {
-		// Fallback picker when UI not bundled
-		if r.URL.Path == "/" {
-			g.handleIndex(w, r)
-			return
-		}
-		http.Error(w, "PUBLIC_DIR not configured (WebUI not found)", http.StatusServiceUnavailable)
+	// The public WebUI is compiled into the hub binary.  Any unknown non-API
+	// path is treated as an SPA route and receives index.html.
+	name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	if name == "" || name == "." {
+		name = "index.html"
+	}
+	file, err := embeddedPublic.Open(name)
+	if err != nil {
+		name = "index.html"
+		file, err = embeddedPublic.Open(name)
+	}
+	if err != nil {
+		http.Error(w, "embedded WebUI is unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	// SPA-ish: missing files → index.html for non-api
-	path := r.URL.Path
-	if path == "/" {
-		path = "/index.html"
-	}
-	full := filepath.Join(dir, filepath.Clean("/"+path))
-	if !strings.HasPrefix(full, dir) {
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
 		http.NotFound(w, r)
 		return
 	}
-	if st, err := os.Stat(full); err != nil || st.IsDir() {
-		// try index
-		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+	reader, ok := file.(io.ReadSeeker)
+	if !ok {
+		http.Error(w, "embedded WebUI asset is not seekable", http.StatusInternalServerError)
 		return
 	}
-	if ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(full))]; ok {
+	if ct, ok := staticContentTypes[strings.ToLower(path.Ext(name))]; ok {
 		w.Header().Set("Content-Type", ct)
 	}
-	http.ServeFile(w, r, full)
+	http.ServeContent(w, r, name, info.ModTime(), reader)
+}
+
+var embeddedPublic fs.FS
+
+func init() {
+	var err error
+	embeddedPublic, err = fs.Sub(embeddedWeb, "web")
+	if err != nil {
+		panic(err)
+	}
 }
 
 // PUT session meta on hub: body includes machine + keys; fan-out not needed — require machine.

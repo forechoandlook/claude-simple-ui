@@ -103,6 +103,7 @@ export function renderSessionNotesBar() {
   const meta = getSessionMeta(agent, sid);
   const note = (meta.notes || '').trim();
   const fav = !!meta.favorite;
+  const hid = !!meta.hidden;
   const title = (meta.title || '').trim();
   const showTitle = title || sid.slice(0, 8);
   bar.style.display = 'flex';
@@ -112,9 +113,15 @@ export function renderSessionNotesBar() {
               data-fav-session-id="${esc(sid)}" data-fav-session-agent="${esc(agent)}"
               title="${fav ? 'Unfavorite' : 'Favorite'}">${fav ? '★' : '☆'}</button>
       <span id="session-title-display"
-            class="session-title-inline max-w-[40%] truncate font-semibold text-base-content/85 cursor-text hover:text-primary"
-            title="Click to rename"
-            data-rename-bar="1">${esc(showTitle)}</span>
+            class="session-title-inline max-w-[40%] truncate font-semibold text-base-content/85"
+            title="${esc(showTitle)}">${esc(showTitle)}</span>
+      <button type="button" class="session-rename-btn flex-shrink-0 opacity-70 hover:opacity-100"
+              data-rename-bar="1" title="Rename session">✎</button>
+      <button type="button" class="session-hide-btn flex-shrink-0 ${hid ? 'is-hidden' : ''}"
+              data-hide-toggle="1"
+              data-hide-session-id="${esc(sid)}"
+              data-hide-session-agent="${esc(agent)}"
+              title="${hid ? 'Unhide session' : 'Hide session'}">${hid ? '👁' : '🙈'}</button>
       <span class="font-bold text-base-content/40 uppercase flex-shrink-0">Note:</span>
       <span class="truncate text-base-content/70 ${note ? '' : 'italic text-base-content/40'}"
             id="session-notes-text" title="${esc(note || 'Add a note for this session')}">${esc(note || 'No session note')}</span>
@@ -139,17 +146,43 @@ export function renderSessionNotesEditMode() {
   input?.select();
 }
 
-export async function toggleSessionFavorite(sessionId, agent) {
-  const key = metaKey(agent, sessionId);
-  const prev = sessionMetaMap.peek()?.[key] || { favorite: false, notes: '', title: '' };
+function emptyMeta() {
+  return { favorite: false, notes: '', title: '', hidden: false };
+}
+
+function mergeMeta(prev, patch) {
+  return {
+    favorite: patch.favorite !== undefined ? Boolean(patch.favorite) : Boolean(prev.favorite),
+    notes: patch.notes !== undefined ? String(patch.notes || '') : String(prev.notes || ''),
+    title: patch.title !== undefined ? String(patch.title || '').trim() : String(prev.title || '').trim(),
+    hidden: patch.hidden !== undefined ? Boolean(patch.hidden) : Boolean(prev.hidden),
+    updatedAt: Date.now(),
+  };
+}
+
+function isMetaEmpty(m) {
+  return !m?.favorite && !m?.hidden && !(m?.notes || '').trim() && !(m?.title || '').trim();
+}
+
+export async function toggleSessionFavorite(sessionId, agent, { machineId } = {}) {
+  const key = metaKey(agent, sessionId, machineId);
+  const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
   const nextFav = !prev.favorite;
-  // optimistic
   sessionMetaMap.value = {
     ...sessionMetaMap.peek(),
     [key]: { ...prev, favorite: nextFav, updatedAt: Date.now() },
   };
   try {
-    await api('PUT', '/api/sessions/meta', { sessionId, agent, favorite: nextFav });
+    const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, favorite: nextFav });
+    sessionMetaMap.value = {
+      ...sessionMetaMap.peek(),
+      [key]: mergeMeta(prev, {
+        favorite: res.favorite ?? nextFav,
+        notes: res.notes,
+        title: res.title,
+        hidden: res.hidden,
+      }),
+    };
   } catch (e) {
     sessionMetaMap.value = { ...sessionMetaMap.peek(), [key]: prev };
     alert(`Favorite failed: ${e.message}`);
@@ -157,19 +190,53 @@ export async function toggleSessionFavorite(sessionId, agent) {
   if (ctx.sessionId === sessionId) renderSessionNotesBar();
 }
 
+/** Hide / unhide a session (soft archive in the sidebar). */
+export async function toggleSessionHidden(sessionId, agent, { machineId } = {}) {
+  if (!sessionId) return false;
+  const key = metaKey(agent, sessionId, machineId);
+  const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
+  const nextHidden = !prev.hidden;
+  sessionMetaMap.value = {
+    ...sessionMetaMap.peek(),
+    [key]: { ...prev, hidden: nextHidden, updatedAt: Date.now() },
+  };
+  try {
+    const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, hidden: nextHidden });
+    const next = mergeMeta(prev, {
+      favorite: res.favorite,
+      notes: res.notes,
+      title: res.title,
+      hidden: res.hidden ?? nextHidden,
+    });
+    if (isMetaEmpty(next)) {
+      const map = { ...sessionMetaMap.peek() };
+      delete map[key];
+      sessionMetaMap.value = map;
+    } else {
+      sessionMetaMap.value = { ...sessionMetaMap.peek(), [key]: next };
+    }
+  } catch (e) {
+    sessionMetaMap.value = { ...sessionMetaMap.peek(), [key]: prev };
+    alert(`Hide failed: ${e.message}`);
+    return false;
+  }
+  if (ctx.sessionId === sessionId) renderSessionNotesBar();
+  return true;
+}
+
 export async function saveSessionNotes(sessionId, agent, notes) {
   const key = metaKey(agent, sessionId);
-  const prev = sessionMetaMap.peek()?.[key] || { favorite: false, notes: '', title: '' };
+  const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
   try {
     const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, notes });
     sessionMetaMap.value = {
       ...sessionMetaMap.peek(),
-      [key]: {
-        favorite: res.favorite ?? prev.favorite,
+      [key]: mergeMeta(prev, {
+        favorite: res.favorite,
         notes: res.notes ?? notes,
-        title: res.title ?? prev.title ?? '',
-        updatedAt: Date.now(),
-      },
+        title: res.title,
+        hidden: res.hidden,
+      }),
     };
   } catch (e) {
     alert(`Save note failed: ${e.message}`);
@@ -185,31 +252,26 @@ export async function saveSessionNotes(sessionId, agent, notes) {
 export async function renameSession(sessionId, agent, title, { machineId } = {}) {
   if (!sessionId) return false;
   const key = metaKey(agent, sessionId, machineId);
-  const prev = sessionMetaMap.peek()?.[key] || { favorite: false, notes: '', title: '' };
+  const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
   const nextTitle = String(title || '').trim().slice(0, 200);
-  // optimistic
   sessionMetaMap.value = {
     ...sessionMetaMap.peek(),
     [key]: { ...prev, title: nextTitle, updatedAt: Date.now() },
   };
   try {
     const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, title: nextTitle });
-    sessionMetaMap.value = {
-      ...sessionMetaMap.peek(),
-      [key]: {
-        favorite: res.favorite ?? prev.favorite,
-        notes: res.notes ?? prev.notes ?? '',
-        title: res.title !== undefined ? res.title : nextTitle,
-        updatedAt: Date.now(),
-      },
-    };
-    // If server dropped empty entry, keep local clear
-    if (!res.title && !res.favorite && !res.notes) {
+    const next = mergeMeta(prev, {
+      favorite: res.favorite,
+      notes: res.notes,
+      title: res.title !== undefined ? res.title : nextTitle,
+      hidden: res.hidden,
+    });
+    if (isMetaEmpty(next)) {
       const map = { ...sessionMetaMap.peek() };
-      if (!nextTitle && !prev.favorite && !(prev.notes || '').trim()) {
-        delete map[key];
-        sessionMetaMap.value = map;
-      }
+      delete map[key];
+      sessionMetaMap.value = map;
+    } else {
+      sessionMetaMap.value = { ...sessionMetaMap.peek(), [key]: next };
     }
   } catch (e) {
     sessionMetaMap.value = { ...sessionMetaMap.peek(), [key]: prev };

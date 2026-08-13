@@ -15,3 +15,5 @@ tmp
 .ai_sessions.json.migrated
 .ai/
 gateway/dist/
+gateway/web/*
+!gateway/web/.gitkeep

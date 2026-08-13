@@ -8,6 +8,9 @@ let fitAddon  = null;
 let connected = false;
 let lastCwd   = null;
 let lastMachine = null;
+let shellGen = 0;
+let shellReconnectTimer = null;
+let shellWanted = false;
 
 function initXterm() {
   if (term) return;
@@ -88,6 +91,9 @@ function activeMachine() {
 }
 
 function connect(cwd) {
+  if (shellReconnectTimer) { clearTimeout(shellReconnectTimer); shellReconnectTimer = null; }
+  shellWanted = true;
+  const gen = ++shellGen;
   if (ws) { try { ws.close(); } catch {} ws = null; }
   connected = false;
 
@@ -108,12 +114,14 @@ function connect(cwd) {
   ws = new WebSocket(`${proto}://${location.host}/ws/shell?${q}`);
 
   ws.addEventListener('open', () => {
+    if (gen !== shellGen) return;
     connected = true;
     term?.write('\x1b[32mConnected to interactive terminal\x1b[0m\r\n');
     sendResize();
   });
 
   ws.addEventListener('message', e => {
+    if (gen !== shellGen) return;
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'output') {
@@ -126,11 +134,19 @@ function connect(cwd) {
   });
 
   ws.addEventListener('close', () => {
+    if (gen !== shellGen) return;
     connected = false;
     term?.write('\r\n\x1b[33m[disconnected]\x1b[0m\r\n');
+    if (!shellWanted || currentTab.peek() !== 'shell') return;
+    term?.write('\x1b[33m[reconnecting…]\x1b[0m\r\n');
+    shellReconnectTimer = setTimeout(() => {
+      shellReconnectTimer = null;
+      connect(lastCwd);
+    }, 1500);
   });
 
   ws.addEventListener('error', () => {
+    if (gen !== shellGen) return;
     term?.write('\r\n\x1b[31m[WebSocket error]\x1b[0m\r\n');
   });
 }
@@ -161,6 +177,12 @@ function activateShellTab() {
 }
 
 export function initTerminal() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (currentTab.peek() !== 'shell' || !shellWanted) return;
+    if (!connected) connect(lastCwd);
+  });
+
   // Defer xterm until first visit to shell (container must be measurable)
   watch(currentTab, tab => {
     if (tab === 'shell') activateShellTab();

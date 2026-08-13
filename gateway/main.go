@@ -43,10 +43,14 @@ func newID() string {
 }
 
 const (
-	httpTimeout   = 30 * time.Second
-	tunnelTimeout = 10 * time.Second
-	maxBodyBytes  = 25 << 20 // 25 MiB
-	pingInterval  = 30 * time.Second
+	httpTimeout       = 30 * time.Second
+	streamIdleTimeout = 60 * time.Second // no chunk/end received from edge within this window
+	tunnelTimeout     = 10 * time.Second
+	maxBodyBytes      = 25 << 20 // 25 MiB
+	pingInterval         = 30 * time.Second
+	browserPingInterval  = 30 * time.Second
+	browserPongWait      = 75 * time.Second
+	browserWriteTimeout  = 10 * time.Second
 )
 
 var (
@@ -54,7 +58,8 @@ var (
 		CheckOrigin:       func(r *http.Request) bool { return true },
 		ReadBufferSize:    1024 * 64,
 		WriteBufferSize:   1024 * 64,
-		EnableCompression: false,
+		// Compress text frames (chat deltas, shell) over mobile links.
+		EnableCompression: true,
 	}
 	wsPathRe = regexp.MustCompile(`^/machine/([^/]+)(/ws/.+)$`)
 )
@@ -102,6 +107,19 @@ type pendingTunnel struct {
 	ch chan error
 }
 
+// Serialized writes to a browser websocket (data path + keepalive ping).
+type browserSock struct {
+	mu   sync.Mutex
+	conn *websocket.Conn
+}
+
+func (b *browserSock) write(mt int, data []byte) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_ = b.conn.SetWriteDeadline(time.Now().Add(browserWriteTimeout))
+	return b.conn.WriteMessage(mt, data)
+}
+
 type gateway struct {
 	token string
 
@@ -113,7 +131,7 @@ type gateway struct {
 
 	tunMu         sync.Mutex
 	pendingTun    map[string]*pendingTunnel
-	activeTunnels map[string]*websocket.Conn // tunnelId → browser WS
+	activeTunnels map[string]*browserSock // tunnelId → browser WS
 }
 
 func newGateway(token string) *gateway {
@@ -122,7 +140,7 @@ func newGateway(token string) *gateway {
 		machines:      make(map[string]*machine),
 		pending:       make(map[string]*pendingHTTP),
 		pendingTun:    make(map[string]*pendingTunnel),
-		activeTunnels: make(map[string]*websocket.Conn),
+		activeTunnels: make(map[string]*browserSock),
 	}
 }
 
@@ -208,6 +226,100 @@ func (g *gateway) forwardHTTP(machineID, method, path string, headers map[string
 	}
 }
 
+// forwardHTTPStream proxies an HTTP request to the edge machine and writes
+// the response straight to w as it arrives, so long-lived responses (SSE)
+// stream through the hub instead of buffering in full on the edge side.
+//
+// The edge (client.js) replies either with a single legacy "http-res"
+// (status+headers+full body — used for ordinary requests) or, for streamed
+// responses, "http-res-start" (status+headers) followed by zero or more
+// "http-chunk" messages and a terminating "http-end".
+func (g *gateway) forwardHTTPStream(machineID, method, path string, headers map[string]string, body string, w http.ResponseWriter) error {
+	m := g.getMachine(machineID)
+	if m == nil {
+		return fmt.Errorf(`machine "%s" not connected`, machineID)
+	}
+	reqID := newID()
+	ch := make(chan *ctrlMsg, 64)
+	g.httpMu.Lock()
+	g.pending[reqID] = &pendingHTTP{ch: ch}
+	g.httpMu.Unlock()
+	defer func() {
+		g.httpMu.Lock()
+		delete(g.pending, reqID)
+		g.httpMu.Unlock()
+	}()
+
+	if err := m.send(ctrlMsg{
+		Type:    "http-req",
+		ReqID:   reqID,
+		Method:  method,
+		Path:    path,
+		Headers: headers,
+		Body:    body,
+	}); err != nil {
+		return err
+	}
+
+	flusher, _ := w.(http.Flusher)
+	headersWritten := false
+	writeHead := func(status int, hdrs map[string]string) {
+		skip := map[string]bool{"transfer-encoding": true, "connection": true, "keep-alive": true}
+		for k, v := range hdrs {
+			if skip[strings.ToLower(k)] {
+				continue
+			}
+			w.Header().Set(k, v)
+		}
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		headersWritten = true
+	}
+
+	timeout := httpTimeout
+	for {
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			switch msg.Type {
+			case "http-res": // legacy one-shot reply (non-streamed)
+				writeHead(msg.Status, msg.Headers)
+				_, _ = w.Write([]byte(msg.Body))
+				return nil
+			case "http-res-start":
+				writeHead(msg.Status, msg.Headers)
+				if flusher != nil {
+					flusher.Flush()
+				}
+				timeout = streamIdleTimeout
+			case "http-chunk":
+				if !headersWritten {
+					writeHead(200, nil)
+				}
+				_, _ = w.Write([]byte(msg.Data))
+				if flusher != nil {
+					flusher.Flush()
+				}
+				timeout = streamIdleTimeout
+			case "http-end":
+				if !headersWritten {
+					writeHead(200, nil)
+				}
+				return nil
+			}
+		case <-time.After(timeout):
+			if !headersWritten {
+				return fmt.Errorf("machine request timed out")
+			}
+			return nil // best effort: close out whatever streamed so far
+		}
+	}
+}
+
 func (g *gateway) openTunnel(machineID, tunnelID, path, query string) error {
 	m := g.getMachine(machineID)
 	if m == nil {
@@ -244,15 +356,16 @@ func (g *gateway) handleMachineMessage(msg *ctrlMsg) {
 	switch msg.Type {
 	case "pong":
 		return
-	case "http-res":
+	case "http-res", "http-res-start", "http-chunk", "http-end":
 		g.httpMu.Lock()
 		p := g.pending[msg.ReqID]
 		g.httpMu.Unlock()
 		if p != nil {
-			select {
-			case p.ch <- msg:
-			default:
-			}
+			// Streaming responses consist of a sequence of control messages.  Do
+			// not silently discard a chunk when the HTTP writer is briefly busy:
+			// applying backpressure here preserves the SSE event boundary and lets
+			// the websocket/TCP stack pace the edge instead.
+			p.ch <- msg
 		}
 	case "ws-ready":
 		g.tunMu.Lock()
@@ -283,7 +396,7 @@ func (g *gateway) handleMachineMessage(msg *ctrlMsg) {
 		browser := g.activeTunnels[msg.TunnelID]
 		g.tunMu.Unlock()
 		if browser != nil {
-			_ = browser.WriteMessage(websocket.TextMessage, []byte(msg.Data))
+			_ = browser.write(websocket.TextMessage, []byte(msg.Data))
 		}
 	case "ws-close":
 		g.tunMu.Lock()
@@ -291,7 +404,7 @@ func (g *gateway) handleMachineMessage(msg *ctrlMsg) {
 		delete(g.activeTunnels, msg.TunnelID)
 		g.tunMu.Unlock()
 		if browser != nil {
-			_ = browser.Close()
+			_ = browser.conn.Close()
 		}
 	}
 }
@@ -374,31 +487,11 @@ func (g *gateway) handleMachineHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	headers["Host"] = "localhost"
 
-	res, err := g.forwardHTTP(machineID, r.Method, fwdPath, headers, bodyStr)
-	if err != nil {
+	if err := g.forwardHTTPStream(machineID, r.Method, fwdPath, headers, bodyStr, w); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
 	}
-
-	skip := map[string]bool{
-		"transfer-encoding": true,
-		"connection":        true,
-		"keep-alive":        true,
-	}
-	for k, v := range res.Headers {
-		if skip[strings.ToLower(k)] {
-			continue
-		}
-		w.Header().Set(k, v)
-	}
-	status := res.Status
-	if status == 0 {
-		status = http.StatusOK
-	}
-	w.WriteHeader(status)
-	_, _ = w.Write([]byte(res.Body))
 }
 
 // ── WebSocket: machine control ────────────────────────────────────────────────
@@ -525,8 +618,14 @@ func (g *gateway) openBrowserTunnel(w http.ResponseWriter, r *http.Request, mach
 		return
 	}
 
+	sock := &browserSock{conn: browser}
+	_ = browser.SetReadDeadline(time.Now().Add(browserPongWait))
+	browser.SetPongHandler(func(string) error {
+		return browser.SetReadDeadline(time.Now().Add(browserPongWait))
+	})
+
 	g.tunMu.Lock()
-	g.activeTunnels[tunnelID] = browser
+	g.activeTunnels[tunnelID] = sock
 	g.tunMu.Unlock()
 	defer func() {
 		g.tunMu.Lock()
@@ -534,6 +633,24 @@ func (g *gateway) openBrowserTunnel(w http.ResponseWriter, r *http.Request, mach
 		g.tunMu.Unlock()
 		if m := g.getMachine(machineID); m != nil {
 			_ = m.send(ctrlMsg{Type: "ws-close", TunnelID: tunnelID})
+		}
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTicker(browserPingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if err := sock.write(websocket.PingMessage, nil); err != nil {
+					_ = browser.Close()
+					return
+				}
+			}
 		}
 	}()
 
@@ -693,7 +810,6 @@ func main() {
 	}
 
 	g := newGateway(token)
-	pub := g.publicDir()
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           g,
@@ -703,11 +819,7 @@ func main() {
 	}
 
 	log.Printf("Hub %s listening on %s", version, addr)
-	if pub != "" {
-		log.Printf("WebUI: %s", pub)
-	} else {
-		log.Printf("WebUI: not found — set PUBLIC_DIR to public/ (machine picker only)")
-	}
+	log.Printf("WebUI: embedded in binary")
 	log.Printf("Edges register:  ws://<host>/machine-connect  (header X-Machine-Token)")
 	log.Printf("Hub login:       HUB_USERNAME / HUB_PASSWORD (default admin / MACHINE_TOKEN)")
 	log.Printf("Health:          http://<host>/healthz")

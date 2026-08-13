@@ -1,5 +1,5 @@
 // files.js — Files tab with upload / download / delete + text/office preview
-import { effect, delegate, esc, $ } from './lib.js';
+import { effect, asyncEffect, delegate, esc, $ } from './lib.js';
 import { currentProject, currentTab, filesRoot, filesPath, viewingFile, ctx } from './state.js';
 import { api, authHeaders, authQuery } from './api.js';
 
@@ -407,7 +407,7 @@ export function initFilesTab() {
       ${!isFile ? `<button id="btn-upload" class="btn btn-ghost btn-xs text-base-content/50 hover:text-base-content">↑ Upload</button>` : ''}`;
   });
 
-  effect(() => {
+  asyncEffect(async signal => {
     const tab = currentTab.value;
     const proj = currentProject.value;
     // Prefer explicit filesRoot; else session cwd on the selected machine
@@ -416,40 +416,32 @@ export function initFilesTab() {
     const dir = filesPath.value;
     const area = $('files-area');
     if (!area) return;
-    const ctrl = new AbortController();
-    if (tab !== 'files') { return () => ctrl.abort(); }
+    if (tab !== 'files') return;
     if (!root) {
       area.innerHTML = '<div class="p-4 text-xs text-base-content/40">No path yet — open a session (uses that machine&apos;s cwd) or type an absolute path and press Go.</div>';
-      return () => ctrl.abort();
+      return;
     }
     const id = proj?.id || '_';
     area.innerHTML = '<div class="p-4 text-xs text-base-content/40">Loading…</div>';
-    if (file !== null) {
-      api('GET', `/api/projects/${id}/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(file)}`, undefined, ctrl.signal)
-        .then(d => { if (!ctrl.signal.aborted) return showFile(area, file, d, ctrl.signal); })
-        .catch(e => {
-          if (!ctrl.signal.aborted && e?.name !== 'AbortError') {
-            area.innerHTML = `<div class="p-4 text-xs text-error">${esc(e.message)}</div>`;
-          }
-        });
-    } else {
-      api('GET', `/api/projects/${id}/files?root=${encodeURIComponent(root)}&path=${encodeURIComponent(dir)}`, undefined, ctrl.signal)
-        .then(d => {
-          if (ctrl.signal.aborted) return;
-          const list = Array.isArray(d) ? d : (Array.isArray(d?.files) ? d.files : null);
-          if (!list) {
-            area.innerHTML = `<div class="p-4 text-xs text-error">${esc(d?.error || 'Invalid directory listing')}</div>`;
-            return;
-          }
-          area.innerHTML = renderDir(list);
-        })
-        .catch(e => {
-          if (!ctrl.signal.aborted && e?.name !== 'AbortError') {
-            area.innerHTML = `<div class="p-4 text-xs text-error">${esc(e.message)}</div>`;
-          }
-        });
+    try {
+      if (file !== null) {
+        const data = await api('GET', `/api/projects/${id}/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(file)}`, undefined, signal);
+        if (!signal.aborted) await showFile(area, file, data, signal);
+        return;
+      }
+      const data = await api('GET', `/api/projects/${id}/files?root=${encodeURIComponent(root)}&path=${encodeURIComponent(dir)}`, undefined, signal);
+      if (signal.aborted) return;
+      const list = Array.isArray(data) ? data : (Array.isArray(data?.files) ? data.files : null);
+      if (!list) {
+        area.innerHTML = `<div class="p-4 text-xs text-error">${esc(data?.error || 'Invalid directory listing')}</div>`;
+        return;
+      }
+      area.innerHTML = renderDir(list);
+    } catch (e) {
+      if (!signal.aborted && e?.name !== 'AbortError') {
+        area.innerHTML = `<div class="p-4 text-xs text-error">${esc(e.message)}</div>`;
+      }
     }
-    return () => ctrl.abort();
   });
 
   delegate.on('click', '[data-dir-path]', (_, el) => { viewingFile.value = null; filesPath.value = el.dataset.dirPath; });

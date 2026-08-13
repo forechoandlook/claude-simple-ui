@@ -2,8 +2,9 @@
 import { watch, delegate, esc, $ } from './lib.js';
 import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEffort, currentPermission,
          currentAgent, setAgent, AGENT_LABELS, getDefaultModel, getModelsForAgent, getEffortsForModel,
-         addCustomModel, chatDensity } from './state.js';
-import { sendWs, api } from './api.js';
+         addCustomModel, chatDensity, wsStatus } from './state.js';
+import { sendWs, api, flushWsQueue, clearWsQueue } from './api.js';
+import { initWakeLock, setWakeLockDesired } from './wake-lock.js';
 
 function assistantLabel() {
   return AGENT_LABELS[currentAgent.peek()] || 'Assistant';
@@ -21,20 +22,238 @@ function stickBottom(el, force) {
   if (force || atBottom(el)) el.scrollTop = el.scrollHeight;
 }
 
-// ── WebSocket ─────────────────────────────────────────────────────────────────
-export function connectWS() {
-  ctx.ws?.close();
+// ── WebSocket (auto-reconnect for mobile radio / background) ─────────────────
+let wsGen = 0;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+let lastPongAt = 0;
+let heartbeatTimer = null;
+let lifecycleBound = false;
+let sawDisconnect = false;
+let lastWsMachine = null;
+let reconnectQuiet = false;
+/** Queued user text to send after current turn finishes (Grok used to block forever). */
+let pendingUserText = null;
+
+function bindSocketLifecycle() {
+  if (lifecycleBound) return;
+  lifecycleBound = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      reconnectDelay = 400;
+      ensureChatSocket({ probe: true });
+      // Re-subscribe so server can re-attach stream / clear stuck busy state
+      if (ctx.ws?.readyState === WebSocket.OPEN && ctx.sessionId) {
+        try { ctx.ws.send(JSON.stringify({ type: 'subscribe', sessionId: ctx.sessionId })); } catch { /* ignore */ }
+      }
+    }
+  });
+  window.addEventListener('online', () => {
+    reconnectDelay = 400;
+    ensureChatSocket({ force: true });
+  });
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) ensureChatSocket({ force: true });
+    else ensureChatSocket({ probe: true });
+  });
+}
+
+function updateConnDot() {
+  const dot = $('conn-dot');
+  if (!dot) return;
+  const st = wsStatus.peek();
+  dot.classList.remove('bg-success', 'bg-warning', 'bg-error', 'bg-base-content/30', 'animate-pulse');
+  if (st === 'open') {
+    dot.classList.add('bg-success');
+    dot.title = '已连接';
+  } else if (st === 'connecting' || st === 'reconnecting') {
+    dot.classList.add('bg-warning', 'animate-pulse');
+    dot.title = st === 'connecting' ? '连接中…' : '重连中…';
+  } else if (st === 'offline') {
+    dot.classList.add('bg-error');
+    dot.title = '离线';
+  } else {
+    dot.classList.add('bg-base-content/30');
+    dot.title = '未连接';
+  }
+}
+
+function ensureChatSocket(opts = {}) {
+  const st = ctx.ws?.readyState;
+  if (opts.force) {
+    reconnectDelay = 400;
+    connectWS({ quiet: true });
+    return;
+  }
+  if (st === WebSocket.OPEN) {
+    if (opts.probe && lastPongAt && Date.now() - lastPongAt > 45_000) {
+      try { ctx.ws.close(); } catch { /* reconnect via close handler */ }
+    } else if (opts.probe && ctx.ws.readyState === WebSocket.OPEN) {
+      try { ctx.ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
+    }
+    return;
+  }
+  if (st === WebSocket.CONNECTING) return;
+  reconnectDelay = Math.min(reconnectDelay, 800);
+  connectWS({ quiet: true });
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  wsStatus.value = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'reconnecting';
+  updateConnDot();
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectWS({ quiet: true });
+  }, reconnectDelay);
+  reconnectDelay = Math.min(Math.round(reconnectDelay * 1.8), 15_000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+}
+
+function startHeartbeat(sock, gen) {
+  stopHeartbeat();
+  // Server already pings ~35s. Client only watches for silence and pings
+  // when the tab is visible — avoids double traffic + radio wake on mobile.
+  heartbeatTimer = setInterval(() => {
+    if (gen !== wsGen || sock.readyState !== WebSocket.OPEN) return;
+    if (lastPongAt && Date.now() - lastPongAt > 70_000) {
+      try { sock.close(); } catch { /* close handler reconnects */ }
+      return;
+    }
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    // Light client probe only if server ping seems late (tunnel stall).
+    if (lastPongAt && Date.now() - lastPongAt > 40_000) {
+      try { sock.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
+    }
+  }, 30_000);
+}
+
+function syncWakeLock() {
+  // Keep screen on while a turn is running OR while a project chat is open and connected.
+  const need = isProcessing.peek()
+    || (!!currentProject.peek() && wsStatus.peek() === 'open');
+  setWakeLockDesired(need);
+}
+
+/** Manual reconnect (toolbar / banner). Resets backoff and forces a new socket. */
+export function refreshConnection() {
+  reconnectDelay = 400;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectQuiet = false;
+  const st = ctx.ws?.readyState;
+  if (st === WebSocket.OPEN || st === WebSocket.CONNECTING) {
+    try { ctx.ws?.close(); } catch { /* ignore */ }
+  }
+  connectWS({ quiet: false });
+  appendSystemMsg('正在重新连接并同步…');
+}
+
+export function connectWS(opts = {}) {
+  bindSocketLifecycle();
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (opts.quiet) reconnectQuiet = true;
+
+  const mid = ctx.machineId || (typeof localStorage !== 'undefined' ? localStorage.getItem('machineId') : null);
+  if (lastWsMachine !== mid) {
+    clearWsQueue();
+    lastWsMachine = mid;
+  }
+
+  const gen = ++wsGen;
+  try { ctx.ws?.close(); } catch { /* ignore */ }
+
+  wsStatus.value = 'connecting';
+  updateConnDot();
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const q = new URLSearchParams();
   if (ctx.token) q.set('token', ctx.token);
-  // Hub mode: route chat WS to the selected edge
-  const mid = ctx.machineId || (typeof localStorage !== 'undefined' ? localStorage.getItem('machineId') : null);
   if (mid) q.set('machine', mid);
-  ctx.ws = new WebSocket(`${proto}://${location.host}/ws/chat?${q}`);
-  ctx.ws.addEventListener('open',    () => appendSystemMsg(mid ? `Connected · ${mid}` : 'Connected'));
-  ctx.ws.addEventListener('message', e  => handleWsMessage(JSON.parse(e.data)));
-  ctx.ws.addEventListener('close',   () => { if (isProcessing.peek()) { appendSystemMsg('Connection closed'); isProcessing.value = false; } });
-  ctx.ws.addEventListener('error',   () => { appendSystemMsg('WebSocket error'); isProcessing.value = false; });
+  if (ctx.sessionId) q.set('sessionId', ctx.sessionId);
+
+  const sock = new WebSocket(`${proto}://${location.host}/ws/chat?${q}`);
+  ctx.ws = sock;
+
+  sock.addEventListener('open', () => {
+    if (gen !== wsGen) return;
+    reconnectDelay = 1000;
+    lastPongAt = Date.now();
+    wsStatus.value = 'open';
+    updateConnDot();
+    if (ctx.sessionId) {
+      try { sock.send(JSON.stringify({ type: 'subscribe', sessionId: ctx.sessionId })); } catch { /* ignore */ }
+    }
+    flushWsQueue();
+    startHeartbeat(sock, gen);
+    syncWakeLock();
+    if (sawDisconnect && !reconnectQuiet) {
+      appendSystemMsg(mid ? `已重连 · ${mid}` : '已重连');
+    }
+    sawDisconnect = false;
+    reconnectQuiet = false;
+  });
+
+  sock.addEventListener('message', e => {
+    if (gen !== wsGen) return;
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.type === 'pong') { lastPongAt = Date.now(); return; }
+    if (msg.type === 'ping') {
+      lastPongAt = Date.now();
+      if (sock.readyState === WebSocket.OPEN) {
+        try { sock.send(JSON.stringify({ type: 'pong' })); } catch { /* ignore */ }
+      }
+      return;
+    }
+    if (msg.type === 'run-status') {
+      // Only adopt "running" from server; never re-lock after we already finished a turn
+      // unless the server still has a busy run (reconnect mid-stream).
+      if (msg.running) {
+        isProcessing.value = true;
+      } else if (isProcessing.peek()) {
+        // Server says idle — unlock (fixes Grok lingering process / missed complete)
+        isProcessing.value = false;
+        flushPendingUserText();
+      }
+      syncWakeLock();
+      return;
+    }
+    handleWsMessage(msg);
+  });
+
+  sock.addEventListener('close', () => {
+    if (gen !== wsGen) return;
+    stopHeartbeat();
+    sawDisconnect = true;
+    wsStatus.value = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'reconnecting';
+    updateConnDot();
+    scheduleReconnect();
+  });
+
+  sock.addEventListener('error', () => {
+    // close follows; avoid flipping isProcessing so an in-flight run can resume
+  });
+}
+
+function flushPendingUserText() {
+  if (!pendingUserText || isProcessing.peek()) return;
+  const text = pendingUserText;
+  pendingUserText = null;
+  const input = $('chat-input');
+  if (input) {
+    input.value = text;
+    autoResize(input);
+  }
+  // Defer so isProcessing watch can re-enable send button first
+  setTimeout(() => sendMessage(), 0);
+}
+
+function markTurnDone() {
+  isProcessing.value = false;
+  syncWakeLock();
+  flushPendingUserText();
 }
 
 function handleWsMessage(msg) {
@@ -49,7 +268,6 @@ function handleWsMessage(msg) {
     finalizeThoughtStream();
     finalizeAssistantStream();
     flushToolBatch();
-    isProcessing.value = false;
     const u = msg.usage;
     if (u) {
       const norm = {
@@ -66,24 +284,27 @@ function handleWsMessage(msg) {
       appendHistoryTokenBar(norm);
     }
     if (!msg.is_error) appendSystemMsg('✓ Done');
+    // Unlock immediately so the next Grok turn can be typed/sent without waiting process exit.
+    markTurnDone();
     return;
   }
   if (msg.type === 'complete') {
     finalizeThoughtStream();
     finalizeAssistantStream();
     flushToolBatch();
-    isProcessing.value = false;
     // result already printed "Done" for codex/grok; avoid double for those
     if (!msg.aborted && msg.agent === 'claude') appendSystemMsg('✓ Done');
     else if (!msg.aborted && msg.agent && msg.agent !== 'claude' && !msg.error) { /* result handled it */ }
     else if (!msg.aborted && !msg.agent) appendSystemMsg('✓ Done');
+    else if (msg.aborted) appendSystemMsg('已停止');
+    markTurnDone();
     return;
   }
   if (msg.type === 'error') {
     finalizeThoughtStream();
     finalizeAssistantStream();
     appendMsg('error', 'Error', msg.message);
-    isProcessing.value = false;
+    markTurnDone();
     return;
   }
   if (msg.type === 'shell-start') { ctx.shellBubble = null; return; }
@@ -95,7 +316,7 @@ function handleWsMessage(msg) {
   if (msg.type === 'shell-exit') {
     ctx.shellBubble = null;
     appendSystemMsg(msg.code === 0 ? '✓ Exit 0' : `✗ Exit ${msg.code}${msg.error ? ': ' + msg.error : ''}`);
-    isProcessing.value = false;
+    markTurnDone();
     return;
   }
   if (msg.type === 'assistant') {
@@ -467,7 +688,18 @@ async function showUsageCommand() {
 export function sendMessage() {
   const input = $('chat-input');
   const text  = input?.value.trim();
-  if (!text || isProcessing.peek() || !currentProject.peek()) return;
+  if (!text || !currentProject.peek()) return;
+
+  // While a turn is running, queue the next message (common Grok complaint).
+  if (isProcessing.peek()) {
+    pendingUserText = text;
+    input.value = '';
+    autoResize(input);
+    updateInputMode('');
+    appendSystemMsg(`已排队下一条，当前回复结束后发送：${text.length > 80 ? text.slice(0, 80) + '…' : text}`);
+    return;
+  }
+
   input.value = '';
   autoResize(input);
   updateInputMode('');
@@ -479,17 +711,19 @@ export function sendMessage() {
   }
 
   isProcessing.value = true;
+  syncWakeLock();
   const now = Date.now();
   if (text.startsWith('!')) {
     appendMsg('shell', '$ Shell', text.slice(1).trim(), { ts: now });
-    sendWs({ type: 'shell-command', command: text.slice(1).trim(), cwd: currentProject.peek().path });
+    const ok = sendWs({ type: 'shell-command', command: text.slice(1).trim(), cwd: currentProject.peek().path });
+    if (!ok) appendSystemMsg('连接未就绪，命令已入队，重连后发送');
   } else {
     flushToolBatch();
     appendMsg('user', 'You', text, { ts: now });
     const effort     = currentEffort.peek();
     const permission = currentPermission.peek();
     const agent      = currentAgent.peek() || 'claude';
-    sendWs({ type: 'agent-command', agent, command: text, options: {
+    const ok = sendWs({ type: 'agent-command', agent, command: text, options: {
       agent,
       cwd:       currentProject.peek().path,
       sessionId: ctx.sessionId,
@@ -499,12 +733,14 @@ export function sendMessage() {
       ...(permission && permission !== 'default' && { permissionMode: permission }),
       ...(permission === 'bypassPermissions' && { allowDangerouslySkipPermissions: true }),
     }});
+    if (!ok) appendSystemMsg('连接未就绪，消息已入队，重连后发送');
   }
 }
 
 export function stopProcessing() {
   if (ctx.sessionId) sendWs({ type: 'abort-session', sessionId: ctx.sessionId });
-  isProcessing.value = false;
+  pendingUserText = null;
+  markTurnDone();
 }
 
 export function newSession() {
@@ -977,13 +1213,52 @@ function highlightCode(root) {
 // ── Init (called after HTML is in DOM) ────────────────────────────────────────
 export function initChat() {
   applyChatDensity();
+  initWakeLock();
+
+  watch(wsStatus, st => {
+    updateConnDot();
+    syncWakeLock();
+    const el = $('ws-banner');
+    const text = $('ws-banner-text');
+    if (!el) return;
+    if (st === 'open' || st === 'idle') {
+      el.classList.add('hidden');
+      if (text) text.textContent = '';
+      return;
+    }
+    // Show banner for reconnecting/offline; brief connecting after a drop
+    if (st === 'connecting' && !sawDisconnect) {
+      el.classList.add('hidden');
+      return;
+    }
+    el.classList.remove('hidden');
+    const msg = st === 'offline'
+      ? '网络已断开，恢复后会自动重连'
+      : st === 'connecting'
+        ? '正在连接…'
+        : '连接中断，正在重连…（熄屏或切网时常见）';
+    if (text) text.textContent = msg;
+    else el.textContent = msg;
+  });
+
+  watch(currentProject, () => syncWakeLock());
+
+  delegate.on('click', '#btn-refresh-conn, #ws-banner-retry', e => {
+    e.preventDefault();
+    refreshConnection();
+  });
 
   // Processing state → send/stop buttons + typing indicator
+  // Keep the input enabled so the next message can be composed (and queued).
   watch(isProcessing, val => {
     $('send-btn')?.classList.toggle('hidden', val);
     $('stop-btn')?.classList.toggle('hidden', !val);
     const input = $('chat-input');
-    if (input) input.disabled = val;
+    if (input) {
+      input.disabled = false;
+      if (val) input.placeholder = '回复中… 可先写好下一条，结束后自动发送 · 或点 ■ 停止';
+      else updateInputMode(input.value || '');
+    }
     const msgs = $('messages');
     if (!msgs) return;
     const existing = $('typing-indicator');
@@ -995,6 +1270,7 @@ export function initChat() {
       existing?.remove();
       flushToolBatch();
     }
+    syncWakeLock();
   });
 
   watch(chatDensity, () => applyChatDensity());

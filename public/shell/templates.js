@@ -61,7 +61,10 @@ export const AppShell = (opts = {}) => {
         </div>
       </div>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
+      <span id="conn-dot" class="w-2 h-2 rounded-full bg-base-content/30 flex-shrink-0" title="连接状态"></span>
       <div class="flex gap-2">
+        <button id="btn-refresh-conn" class="btn btn-ghost btn-xs border border-base-300" title="重新连接并同步">↻</button>
+        <button id="btn-pwa-install" class="btn btn-ghost btn-xs border border-base-300 hidden" title="安装到主屏幕">安装</button>
         <button id="btn-meta-agent"  class="btn btn-ghost btn-xs border border-primary/40 text-primary" title="Meta Agent — 报告 / 问答 / VLM">✦ Agent</button>
         <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ New</button>
         <button id="btn-theme"        class="btn btn-ghost btn-xs border border-base-300">🌙</button>
@@ -114,6 +117,7 @@ export const AppShell = (opts = {}) => {
             <button data-agent-filter="codex" class="agent-pill">Codex</button>
             <button data-agent-filter="grok" class="agent-pill">Grok</button>
             <button id="btn-fav-filter" class="agent-pill" title="Show only favorites">★ Fav</button>
+            <button id="btn-hidden-filter" class="agent-pill" title="Show only hidden sessions">🙈 Hidden</button>
           </div>
           <div id="search-status" class="hidden text-[10px] text-base-content/40 px-0.5"></div>
         </div>
@@ -205,6 +209,10 @@ export const AppShell = (opts = {}) => {
           <div id="tab-chat" class="flex flex-col flex-1 overflow-hidden relative">
             <div id="project-notes-bar" class="bg-base-200 border-b border-base-300 px-3 py-1.5 text-xs flex flex-col gap-1" style="display:none"></div>
             <div id="session-notes-bar" class="bg-base-200/80 border-b border-base-300 px-3 py-1 text-xs flex justify-between items-center gap-2" style="display:none"></div>
+            <div id="ws-banner" class="hidden px-3 py-1.5 text-[11px] text-center bg-warning/15 text-warning border-b border-warning/20 flex items-center justify-center gap-2">
+              <span id="ws-banner-text"></span>
+              <button type="button" id="ws-banner-retry" class="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-warning border border-warning/30">重连</button>
+            </div>
             <div id="messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
             <div id="scroll-nav" class="absolute right-3 bottom-24 flex flex-col gap-1.5 z-10">
               <button id="scroll-top-btn" class="scroll-fab hidden" title="Jump to top">↑</button>
@@ -258,7 +266,7 @@ export const AppShell = (opts = {}) => {
               <div class="flex gap-2 items-end px-3 pt-2 pb-2">
                 <button id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options" style="height:40px">⚙</button>
                 <textarea id="chat-input" rows="1" placeholder="Ask… (!cmd shell · ⌘↵ send)"
-                  class="textarea textarea-bordered flex-1 text-sm resize-none leading-relaxed"
+                  class="chat-input flex-1 text-sm resize-none leading-relaxed"
                   style="min-height:40px;max-height:140px"></textarea>
                 <button id="send-btn" class="btn btn-primary btn-sm flex-shrink-0" style="height:40px">Send</button>
                 <button id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0" style="height:40px">■</button>

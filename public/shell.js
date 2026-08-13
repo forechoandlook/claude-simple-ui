@@ -9,10 +9,11 @@ import {
   currentModel, currentEffort, currentPermission, currentAgent, setAgent,
   sidebarView, agentFilter, timeRange, activityHits, activityLoading,
   chatDensity, setChatDensity,
-  favoritesOnly, hubMode, hubMachineReady, selectedMachineId, setSelectedMachine,
+  favoritesOnly, showHiddenOnly, hubMode, hubMachineReady, selectedMachineId, setSelectedMachine,
   machinesList, AGENT_LABELS, getDefaultModel, sessionMetaMap, ctx,
 } from './state.js';
 import { api } from './api.js';
+import { promptPwaInstall } from './pwa.js';
 import { getLastSessionContext } from './shell/session-context.js';
 import {
   connectWS, clearMessages, appendMsg, appendSystemMsg, sendMessage, stopProcessing,
@@ -34,7 +35,7 @@ import { showApp } from './shell/boot.js';
 import {
   fetchProjectNotes, renderProjectNotesDisplayMode, renderProjectNotesEditMode,
   renderSessionNotesBar, renderSessionNotesEditMode,
-  toggleSessionFavorite, saveSessionNotes, startInlineRename, setProjectNoteFields,
+  toggleSessionFavorite, toggleSessionHidden, saveSessionNotes, startInlineRename, setProjectNoteFields,
 } from './shell/notes.js';
 import {
   refreshMachinesList, renderMachinePickerList, renderMachineMenuList,
@@ -235,7 +236,15 @@ export function initShell(opts = {}) {
   initSidebarResize();
   initSidebarToggle();
 
-  document.addEventListener('sessions-changed', () => loadAllSessions());
+  let sessionsChangedTimer = null;
+  document.addEventListener('sessions-changed', () => {
+    // Debounce: rapid agent turns would otherwise re-download the full list.
+    if (sessionsChangedTimer) clearTimeout(sessionsChangedTimer);
+    sessionsChangedTimer = setTimeout(() => {
+      sessionsChangedTimer = null;
+      loadAllSessions({ waitFresh: false });
+    }, 1200);
+  });
   document.addEventListener('router:home', goHome);
 
   document.addEventListener('router:session', async ({ detail: { id, tab } }) => {
@@ -279,6 +288,7 @@ export function initShell(opts = {}) {
   delegate.on('change', '#time-range', (_, el) => {
     timeRange.value = el.value;
     localStorage.setItem('timeRange', el.value);
+    loadAllSessions({ waitFresh: true });
     if (sessionSearch.peek().trim()) scheduleActivitySearch(sessionSearch.peek());
   });
   delegate.on('dblclick', '[data-project-cwd]', (_, el) => {
@@ -287,6 +297,21 @@ export function initShell(opts = {}) {
     const name = cwd.split('/').filter(Boolean).pop() || cwd;
     openProject({ id: name, name, path: cwd });
     appendSystemMsg(`Project · ${cwd}`);
+  });
+  delegate.on('click', '#btn-pwa-install', async () => {
+    const ok = await promptPwaInstall();
+    if (!ok) {
+      // iOS / browsers without beforeinstallprompt
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      appendSystemMsg(
+        isIOS
+          ? 'iOS：点分享 →「添加到主屏幕」即可安装'
+          : '请使用浏览器菜单「安装应用 / 添加到主屏幕」',
+      );
+    }
+  });
+  document.addEventListener('pwa-installable', () => {
+    document.getElementById('btn-pwa-install')?.classList.remove('hidden');
   });
   delegate.on('click', '#btn-settings', openSettings);
   delegate.on('click', '#btn-meta-agent', () => toggleMetaAgent());
@@ -308,9 +333,11 @@ export function initShell(opts = {}) {
 
   delegate.on('click', '[data-session-id]', (e, el) => {
     if (e.target.closest('[data-fav-toggle]')) return;
+    if (e.target.closest('[data-hide-toggle]')) return;
     if (e.target.closest('[data-rename-session]')) return;
     if (e.target.closest('.session-rename-input')) return;
     if (e.target.closest('.session-title-wrap.session-rename-active')) return;
+    // Only open when clicking the row / title — not action buttons
     resumeSession(
       el.dataset.sessionId,
       el.dataset.sessionCwd || null,
@@ -320,7 +347,7 @@ export function initShell(opts = {}) {
     );
     closeSidebarOnMobile();
   });
-  // Inline rename (sidebar): click title or ✎ — no dialog
+  // Inline rename (sidebar): only the ✎ button — title click opens the session
   delegate.on('click', '[data-rename-session]', (e, el) => {
     e.preventDefault();
     e.stopPropagation();
@@ -335,12 +362,12 @@ export function initShell(opts = {}) {
       mountEl: wrap,
     });
   });
-  // Inline rename (session bar title)
-  delegate.on('click', '[data-rename-bar], #session-title-display', (e, el) => {
+  // Inline rename (session bar): only the ✎ button next to the title
+  delegate.on('click', '[data-rename-bar]', (e, el) => {
     e.preventDefault();
     e.stopPropagation();
     if (!ctx.sessionId) return;
-    const mountEl = el.id === 'session-title-display' ? el : (el.closest('#session-title-display') || el);
+    const mountEl = document.getElementById('session-title-display') || el;
     startInlineRename({
       sessionId: ctx.sessionId,
       agent: ctx.agent || currentAgent.peek() || 'claude',
@@ -540,7 +567,18 @@ export function initShell(opts = {}) {
     e.preventDefault();
     const mid = el.dataset.favSessionMachine || ctx.machineId;
     if (mid) { ctx.machineId = mid; localStorage.setItem('machineId', mid); }
-    toggleSessionFavorite(el.dataset.favSessionId, el.dataset.favSessionAgent || 'claude');
+    toggleSessionFavorite(el.dataset.favSessionId, el.dataset.favSessionAgent || 'claude', {
+      machineId: mid || null,
+    });
+  });
+  delegate.on('click', '[data-hide-toggle]', (e, el) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const mid = el.dataset.hideSessionMachine || ctx.machineId;
+    if (mid) { ctx.machineId = mid; localStorage.setItem('machineId', mid); }
+    toggleSessionHidden(el.dataset.hideSessionId, el.dataset.hideSessionAgent || 'claude', {
+      machineId: mid || null,
+    });
   });
   delegate.on('click', '#btn-edit-session-notes, #session-notes-text', () => {
     renderSessionNotesEditMode();
@@ -566,6 +604,23 @@ export function initShell(opts = {}) {
     favoritesOnly.value = next;
     localStorage.setItem('favoritesOnly', next ? '1' : '0');
     $('btn-fav-filter')?.classList.toggle('active', next);
+    // Fav and Hidden filters are exclusive for clarity
+    if (next && showHiddenOnly.peek()) {
+      showHiddenOnly.value = false;
+      localStorage.setItem('showHiddenOnly', '0');
+      $('btn-hidden-filter')?.classList.remove('active');
+    }
+  });
+  delegate.on('click', '#btn-hidden-filter', () => {
+    const next = !showHiddenOnly.peek();
+    showHiddenOnly.value = next;
+    localStorage.setItem('showHiddenOnly', next ? '1' : '0');
+    $('btn-hidden-filter')?.classList.toggle('active', next);
+    if (next && favoritesOnly.peek()) {
+      favoritesOnly.value = false;
+      localStorage.setItem('favoritesOnly', '0');
+      $('btn-fav-filter')?.classList.remove('active');
+    }
   });
 
   refreshModelSelect();
@@ -578,6 +633,7 @@ export function initShell(opts = {}) {
     btn.classList.toggle('active', btn.dataset.agentFilter === agentFilter.peek());
   });
   $('btn-fav-filter')?.classList.toggle('active', favoritesOnly.peek());
+  $('btn-hidden-filter')?.classList.toggle('active', showHiddenOnly.peek());
   document.querySelectorAll('[data-view]').forEach(btn => {
     const on = btn.dataset.view === sidebarView.peek();
     btn.classList.toggle('bg-primary/15', on);

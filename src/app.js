@@ -9,6 +9,7 @@ import fsSync from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { runClaude } from './agents/claude.js';
 import { runCodex } from './agents/codex.js';
@@ -25,6 +26,7 @@ import {
 } from './agents/sessions.js';
 import { createMetaAgent } from './agents/meta-agent.js';
 import { discoverAllAgentModels } from './agents/models.js';
+import { createTextBatcher } from './agents/stream-batch.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
 
@@ -269,6 +271,27 @@ async function isGitRepo(dir) {
 
 // ─── Active agent sessions ────────────────────────────────────────────────────
 const activeSessions = new Map();
+/** Live chat sockets so a mobile reconnect can resume an in-flight run. */
+const chatClients = new Set();
+
+function sendJson(ws, data) {
+  if (ws.readyState === ws.OPEN) {
+    try { ws.send(JSON.stringify(data)); } catch { /* ignore */ }
+  }
+}
+
+function broadcastChat(sessionId, data, fallbackWs) {
+  let n = 0;
+  if (sessionId) {
+    for (const c of chatClients) {
+      if (c.sessionId === sessionId) {
+        sendJson(c.ws, data);
+        n++;
+      }
+    }
+  }
+  if (n === 0 && fallbackWs) sendJson(fallbackWs, data);
+}
 
 async function listSessions(filterCwd = null, agentFilter = null) {
   const agents = agentFilter
@@ -300,19 +323,84 @@ async function dispatchAgent(agent, command, options, send) {
 }
 
 function abortSession(sessionId) {
-  const s = activeSessions.get(sessionId);
-  if (!s) return false;
-  if (s.controller) s.controller.abort();
-  if (typeof s.abort === 'function') s.abort();
-  else if (s.child) {
-    try { s.child.kill('SIGTERM'); } catch {}
+  if (!sessionId) return false;
+  let ok = false;
+  // Grok/Codex may register under temp key + real sessionId — abort every match.
+  for (const [key, s] of activeSessions) {
+    if (key !== sessionId && s?.sessionId !== sessionId && s?.key !== sessionId) continue;
+    if (s.controller) s.controller.abort();
+    if (typeof s.abort === 'function') s.abort();
+    else if (s.child) {
+      try { s.child.kill('SIGTERM'); } catch {}
+    }
+    s.busy = false;
+    ok = true;
   }
-  return true;
+  return ok;
+}
+
+/** Whether a session still has an in-flight UI-blocking run. */
+function isSessionBusy(sessionId) {
+  if (!sessionId) return false;
+  for (const [key, s] of activeSessions) {
+    if (key !== sessionId && s?.sessionId !== sessionId) continue;
+    if (s && s.busy !== false) return true;
+  }
+  return false;
+}
+
+function markSessionIdle(sessionId, tempKey) {
+  for (const key of [sessionId, tempKey].filter(Boolean)) {
+    const s = activeSessions.get(key);
+    if (s) s.busy = false;
+  }
+}
+
+/** Shrink history payloads: huge tool inputs dominate mobile transfers. */
+function compactHistoryMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((m) => {
+    if (!m || typeof m !== 'object') return m;
+    if (m.type === 'tool_use' && m.input != null) {
+      let raw;
+      try { raw = typeof m.input === 'string' ? m.input : JSON.stringify(m.input); }
+      catch { raw = String(m.input); }
+      if (raw.length > 1600) {
+        return { ...m, input: { _truncated: true, preview: raw.slice(0, 1600), bytes: raw.length } };
+      }
+    }
+    if (m.type === 'text' && typeof m.content === 'string' && m.content.length > 48_000) {
+      return { ...m, content: `${m.content.slice(0, 48_000)}\n…` };
+    }
+    return m;
+  });
 }
 
 // ─── App factory ──────────────────────────────────────────────────────────────
 export function createApp() {
   const app = express();
+
+  // Gzip JSON/text API responses when client accepts it (hub tunnel + mobile).
+  app.use((req, res, next) => {
+    const ae = req.headers['accept-encoding'] || '';
+    if (!/\bgzip\b/i.test(ae) || req.method === 'HEAD') return next();
+    const origJson = res.json.bind(res);
+    res.json = (body) => {
+      let buf;
+      try { buf = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body)); }
+      catch { return origJson(body); }
+      if (buf.length < 900) return origJson(body);
+      zlib.gzip(buf, { level: 6 }, (err, zipped) => {
+        if (err || !zipped || zipped.length >= buf.length * 0.95) return origJson(body);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Vary', 'Accept-Encoding');
+        res.setHeader('Content-Length', zipped.length);
+        res.status(res.statusCode || 200).end(zipped);
+      });
+    };
+    next();
+  });
 
   app.post('/api/upload-image', authMiddleware, (req, res) => {
     (async () => {
@@ -641,11 +729,11 @@ export function createApp() {
 
   app.put('/api/sessions/meta', authMiddleware, async (req, res) => {
     try {
-      const { sessionId, agent, favorite, notes, title } = req.body || {};
+      const { sessionId, agent, favorite, notes, title, hidden } = req.body || {};
       if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
       const key = sessionMetaKey(agent || 'claude', sessionId);
       const db = await loadSessionMeta();
-      const prev = db[key] || { favorite: false, notes: '', title: '', updatedAt: 0 };
+      const prev = db[key] || { favorite: false, notes: '', title: '', hidden: false, updatedAt: 0 };
       const next = {
         favorite: favorite !== undefined ? Boolean(favorite) : Boolean(prev.favorite),
         notes: notes !== undefined ? String(notes || '') : String(prev.notes || ''),
@@ -653,10 +741,11 @@ export function createApp() {
         title: title !== undefined
           ? String(title || '').trim().slice(0, 200)
           : String(prev.title || '').trim(),
+        hidden: hidden !== undefined ? Boolean(hidden) : Boolean(prev.hidden),
         updatedAt: Date.now(),
       };
       // Drop empty entries to keep file small
-      if (!next.favorite && !next.notes && !next.title) {
+      if (!next.favorite && !next.notes && !next.title && !next.hidden) {
         delete db[key];
       } else {
         db[key] = next;
@@ -665,7 +754,7 @@ export function createApp() {
       res.json({
         success: true,
         key,
-        ...(db[key] || { favorite: false, notes: '', title: '', updatedAt: Date.now() }),
+        ...(db[key] || { favorite: false, notes: '', title: '', hidden: false, updatedAt: Date.now() }),
       });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -701,8 +790,21 @@ export function createApp() {
     try {
       const filterCwd = typeof req.query.cwd === 'string' ? req.query.cwd : null;
       const agent = typeof req.query.agent === 'string' ? req.query.agent : null;
-      const sessions = await listSessions(filterCwd || null, agent);
-      res.json(sessions.map(toClientSession));
+      const days = parseInt(req.query.days || '0', 10) || 0;
+      let limit = parseInt(req.query.limit || '0', 10) || 0;
+      if (limit < 0) limit = 0;
+      if (limit > 800) limit = 800;
+      let sessions = (await listSessions(filterCwd || null, agent)).map(toClientSession);
+      if (days > 0) {
+        const since = Date.now() - days * 86400000;
+        sessions = sessions.filter(s => (s.updatedAt || 0) >= since);
+      }
+      if (limit > 0 && sessions.length > limit) sessions = sessions.slice(0, limit);
+      const etag = `"s${crypto.createHash('sha1').update(JSON.stringify(sessions)).digest('base64url').slice(0, 20)}"`;
+      res.setHeader('ETag', etag);
+      res.setHeader('Cache-Control', 'private, max-age=15');
+      if (req.headers['if-none-match'] === etag) return res.status(304).end();
+      res.json(sessions);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -752,11 +854,12 @@ export function createApp() {
       const { sessionId } = req.params;
       if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
       const preferred = typeof req.query.agent === 'string' ? req.query.agent : null;
-      // tail=0 → full history; default last 120 messages for fast first paint
-      let tail = parseInt(req.query.tail ?? '120', 10);
-      if (Number.isNaN(tail)) tail = 120;
+      // tail=0 → full history; default last 80 messages (mobile-friendly)
+      let tail = parseInt(req.query.tail ?? '80', 10);
+      if (Number.isNaN(tail)) tail = 80;
       if (tail < 0) tail = 0;
       if (tail > 2000) tail = 2000;
+      const compact = req.query.compact !== '0' && req.query.compact !== 'false';
       const opts = {
         claudeConfigDirs: CLAUDE_CONFIG_DIRS,
         codexHome: CODEX_HOME,
@@ -782,6 +885,7 @@ export function createApp() {
         messages = messages.slice(-tail);
         truncated = true;
       }
+      if (compact) messages = compactHistoryMessages(messages);
       const payload = {
         messages,
         context: Array.isArray(bundle) ? null : (bundle.context || null),
@@ -789,6 +893,7 @@ export function createApp() {
         total,
         truncated,
         tail: truncated ? tail : total,
+        compact,
       };
       res.setHeader('X-Session-Agent', payload.agent);
       res.setHeader('Cache-Control', 'private, max-age=30');
@@ -1059,6 +1164,7 @@ export function createApp() {
       const result = await meta.runLoop(msgs, {
         chatSessionId: session.id,
         onContent: (content) => sseWrite(res, 'content', { content }),
+        onApproval: ({ id, name, args }) => sseWrite(res, 'approval', { id, name, args }),
         onTool: (name, args, phase, toolResult, id) => {
           if (name === 'analyze_images' && phase === 'done' && toolResult?.thread_id) {
             if (!session.vlmThreadIds.includes(toolResult.thread_id)) {
@@ -1095,10 +1201,31 @@ export function createApp() {
     }
   });
 
+  // User approves/denies a pending sensitive tool call (e.g. run_command) from /api/ai/chat.
+  app.post('/api/ai/approve', authMiddleware, async (req, res) => {
+    const { id, approved } = req.body || {};
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const ok = meta.resolveApproval(id, !!approved);
+    if (!ok) return res.status(404).json({ error: 'no pending approval for id (may have timed out)' });
+    res.json({ ok: true });
+  });
+
   // ─── HTTP + WebSocket server ─────────────────────────────────────────────────
   const server = http.createServer(app);
-  const wssChat  = new WebSocketServer({ noServer: true });
-  const wssShell = new WebSocketServer({ noServer: true });
+  const wssOpts = {
+    noServer: true,
+    perMessageDeflate: {
+      zlibDeflateOptions: { chunkSize: 1024, memLevel: 7, level: 3 },
+      zlibInflateOptions: { chunkSize: 10 * 1024 },
+      clientNoContextTakeover: true,
+      serverNoContextTakeover: true,
+      serverMaxWindowBits: 10,
+      concurrencyLimit: 8,
+      threshold: 256,
+    },
+  };
+  const wssChat  = new WebSocketServer(wssOpts);
+  const wssShell = new WebSocketServer(wssOpts);
 
   server.on('upgrade', (req, socket, head) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -1127,22 +1254,59 @@ export function createApp() {
       return;
     }
 
+    const client = { ws, sessionId: url.searchParams.get('sessionId') || null };
+    chatClients.add(client);
+
     const send = (data) => {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));
+      if (data?.sessionId) client.sessionId = data.sessionId;
+      broadcastChat(client.sessionId, data, ws);
     };
 
     let shellProc = null;
+    let shellOut = null;
+    let shellErr = null;
+    // App-level ping only (JSON survives hub tunnel). Interval kept modest for mobile radio.
+    const heartbeat = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) return;
+      sendJson(ws, { type: 'ping' });
+    }, 35_000);
 
     ws.on('message', async (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); }
       catch { return; }
 
+      if (msg.type === 'ping') {
+        sendJson(ws, { type: 'pong' });
+        return;
+      }
+      if (msg.type === 'pong') return;
+      if (msg.type === 'subscribe') {
+        client.sessionId = msg.sessionId || client.sessionId || null;
+        sendJson(ws, {
+          type: 'run-status',
+          sessionId: client.sessionId,
+          running: isSessionBusy(client.sessionId),
+        });
+        return;
+      }
+
       if (msg.type === 'claude-command' || msg.type === 'agent-command') {
         const agent = msg.agent || msg.options?.agent || 'claude';
-        await dispatchAgent(agent, msg.command || '', msg.options || {}, send);
+        if (msg.options?.sessionId) client.sessionId = msg.options.sessionId;
+        // Wrap send so turn-complete events clear busy immediately (Grok process may linger).
+        const runSend = (data) => {
+          if (data?.type === 'result' || data?.type === 'complete' || data?.type === 'error') {
+            markSessionIdle(data.sessionId || client.sessionId, msg.options?.sessionId);
+          }
+          if (data?.sessionId) client.sessionId = data.sessionId;
+          send(data);
+        };
+        await dispatchAgent(agent, msg.command || '', msg.options || {}, runSend);
       } else if (msg.type === 'shell-command') {
         if (shellProc) { try { shellProc.kill(); } catch {} shellProc = null; }
+        shellOut?.flush();
+        shellErr?.flush();
         const cmd = msg.command || '';
         const cwd = msg.cwd || os.homedir();
         send({ type: 'shell-start', command: cmd });
@@ -1151,17 +1315,41 @@ export function createApp() {
           env: { ...process.env },
           shell: false,
         });
-        shellProc.stdout.on('data', d => send({ type: 'shell-output', stream: 'stdout', data: d.toString() }));
-        shellProc.stderr.on('data', d => send({ type: 'shell-output', stream: 'stderr', data: d.toString() }));
-        shellProc.on('close', (code) => { send({ type: 'shell-exit', code }); shellProc = null; });
-        shellProc.on('error', (e) => { send({ type: 'shell-exit', code: 1, error: e.message }); shellProc = null; });
+        shellOut = createTextBatcher(
+          (data) => send({ type: 'shell-output', stream: 'stdout', data }),
+          { maxWait: 40, maxSize: 2048 },
+        );
+        shellErr = createTextBatcher(
+          (data) => send({ type: 'shell-output', stream: 'stderr', data }),
+          { maxWait: 40, maxSize: 2048 },
+        );
+        shellProc.stdout.on('data', d => shellOut.push(d.toString()));
+        shellProc.stderr.on('data', d => shellErr.push(d.toString()));
+        shellProc.on('close', (code) => {
+          shellOut?.flush();
+          shellErr?.flush();
+          send({ type: 'shell-exit', code });
+          shellProc = null;
+        });
+        shellProc.on('error', (e) => {
+          shellOut?.flush();
+          shellErr?.flush();
+          send({ type: 'shell-exit', code: 1, error: e.message });
+          shellProc = null;
+        });
       } else if (msg.type === 'abort-session') {
         const ok = abortSession(msg.sessionId);
         send({ type: 'abort-result', success: ok, sessionId: msg.sessionId });
       }
     });
 
-    ws.on('close', () => { if (shellProc) { try { shellProc.kill(); } catch {} } });
+    ws.on('close', () => {
+      chatClients.delete(client);
+      clearInterval(heartbeat);
+      shellOut?.flush();
+      shellErr?.flush();
+      if (shellProc) { try { shellProc.kill(); } catch {} }
+    });
     ws.on('error', (e) => console.error('[ws]', e.message));
   });
 
@@ -1249,10 +1437,14 @@ else:
       return;
     }
 
-    proc.stdout.on('data', d => send({ type: 'output', data: d.toString() }));
-    proc.stderr.on('data', d => send({ type: 'output', data: d.toString() }));
-    proc.on('exit',  (code) => { send({ type: 'exit', code }); ws.close(); });
-    proc.on('error', (e)    => { send({ type: 'error', data: e.message }); });
+    const outBatch = createTextBatcher(
+      (data) => send({ type: 'output', data }),
+      { maxWait: 28, maxSize: 3072 },
+    );
+    proc.stdout.on('data', d => outBatch.push(d.toString()));
+    proc.stderr.on('data', d => outBatch.push(d.toString()));
+    proc.on('exit',  (code) => { outBatch.flush(); send({ type: 'exit', code }); ws.close(); });
+    proc.on('error', (e)    => { outBatch.flush(); send({ type: 'error', data: e.message }); });
 
     ws.on('message', raw => {
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -1263,7 +1455,7 @@ else:
       }
     });
 
-    ws.on('close', () => { try { proc.kill('SIGHUP'); } catch {} });
+    ws.on('close', () => { outBatch.flush(); try { proc.kill('SIGHUP'); } catch {} });
     ws.on('error', e => console.error('[ws/shell]', e.message));
   });
 

@@ -346,6 +346,37 @@ function updateToolChip(id, phase, result) {
   }
 }
 
+/** run_command wants to execute — show an inline approve/deny card and POST the answer. */
+function appendApprovalPrompt(d) {
+  const box = $('ma-messages');
+  if (!box) return;
+  const el = document.createElement('div');
+  el.className = 'ma-approval';
+  el.dataset.approvalId = d.id;
+  const cmd = d.args?.command ?? '';
+  el.innerHTML = `
+    <div class="ma-approval-label">⚠ Agent 想要执行命令，是否允许？</div>
+    <pre class="ma-approval-cmd">${esc(cmd)}</pre>
+    <div class="ma-approval-actions">
+      <button type="button" class="btn btn-xs btn-error" data-approve="0">拒绝</button>
+      <button type="button" class="btn btn-xs btn-success" data-approve="1">允许执行</button>
+    </div>`;
+  el.querySelectorAll('[data-approve]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const approved = btn.dataset.approve === '1';
+      el.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+      el.querySelector('.ma-approval-label').textContent = approved ? '✓ 已允许，正在执行…' : '✗ 已拒绝';
+      try {
+        await api('POST', '/api/ai/approve', { id: d.id, approved });
+      } catch (e) {
+        el.querySelector('.ma-approval-label').textContent = `确认失败：${e.message}`;
+      }
+    });
+  });
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
 function nextImgLabel() {
   imgSeq += 1;
   return `img${imgSeq}`;
@@ -713,6 +744,7 @@ async function sendChat() {
           updateToolChip(d.id, d.phase, d.result);
         }
       },
+      approval: (d) => appendApprovalPrompt(d),
       done: (d) => {
         if (d.sessionId) {
           chatSessionId = d.sessionId;
