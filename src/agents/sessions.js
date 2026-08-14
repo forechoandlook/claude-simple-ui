@@ -1196,7 +1196,15 @@ export async function loadSessionMemory(sessionId, agent, { claudeConfigDirs, co
   }
   const file = await findClaudeSessionFile(sessionId, claudeConfigDirs);
   if (!file) return null;
-  return listMemoryFiles(path.dirname(file), 'claude', { claudeProject: true });
+  const primaryRoot = path.dirname(file);
+  const primary = await listMemoryFiles(primaryRoot, 'claude', { claudeProject: true, rootKind: 'agent-project' });
+  // Some Claude setups keep durable memory in the actual project (cwd/memory)
+  // instead of beside the agent transcript. Expose it when the transcript's
+  // own project directory has no memory files.
+  if (primary.files.length) return primary;
+  const meta = await readClaudeSessionMeta(file);
+  if (!meta.cwd || !path.isAbsolute(meta.cwd)) return primary;
+  return listMemoryFiles(meta.cwd, 'claude', { claudeProject: true, rootKind: 'workspace' });
 }
 
 async function listMemoryFiles(root, agent, opts = {}) {
@@ -1249,6 +1257,12 @@ export async function readSessionMemoryFile(sessionId, agent, fileId, opts) {
     const file = await findClaudeSessionFile(sessionId, opts.claudeConfigDirs);
     if (!file) return null;
     root = path.dirname(file);
+    // Match the same workspace fallback used by loadSessionMemory.
+    const primary = await listMemoryFiles(root, 'claude', { claudeProject: true, rootKind: 'agent-project' });
+    if (!primary.files.length) {
+      const meta = await readClaudeSessionMeta(file);
+      if (meta.cwd && path.isAbsolute(meta.cwd)) root = meta.cwd;
+    }
   }
   const listed = await loadSessionMemory(sessionId, agent, opts);
   const meta = listed?.files?.find(f => f.id === id);
