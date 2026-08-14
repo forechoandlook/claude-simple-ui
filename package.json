@@ -1,15 +1,19 @@
 {
   "name": "claude-simple",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "type": "module",
   "bin": {
     "claude-simple": "server.js",
-    "claude-simple-client": "client.js"
+    "claude-simple-client": "client.js",
+    "claude-simple-edge": "bin/edge-ctl.js",
+    "claude-edge": "bin/edge-ctl.js",
+    "edge-daemon": "bin/edge-ctl.js"
   },
   "files": [
     "server.js",
     "client.js",
     "gateway.js",
+    "bin",
     "src",
     "dist",
     "public"

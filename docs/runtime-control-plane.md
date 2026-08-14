@@ -23,6 +23,19 @@ Preferred shape:
 Legacy aliases still work: `agent-command`, `abort-session`,
 `claude-permission-response`, `shell-command`, `subscribe`.
 
+## TODO: one active turn per session
+
+Multiple WebSocket clients may subscribe to the same session: each client
+should receive the live output and be able to reconnect while a turn is
+running. However, a session must have **one writer**. Before dispatching
+`turn.start`, atomically claim `(agent, sessionId)` in `activeSessions`; if it
+is already busy, return a `session-busy` event rather than launching a second
+`--resume <sessionId>` process. Release the claim on every completion, error,
+and abort path.
+
+The busy status must be broadcast to all subscribers. `turn.interrupt` remains
+session-scoped, so any subscribed client can stop the single active turn.
+
 ## Server → client events
 
 UI event types are **stable** (`assistant_delta`, `result`, `complete`, …).

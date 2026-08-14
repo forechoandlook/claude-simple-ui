@@ -499,6 +499,7 @@ export function initShell(opts = {}) {
       setAgent(next);
       currentModel.value = getDefaultModel(next) || currentModel.peek();
       localStorage.setItem('model', currentModel.peek());
+      $('sel-permission').value = currentPermission.peek();
       refreshModelSelect();
       appendSystemMsg(`Agent → ${AGENT_LABELS[next] || next} · model ${currentModel.peek()} · new session`);
     }
@@ -729,6 +730,7 @@ export function initShell(opts = {}) {
   });
 
   refreshModelSelect();
+  $('sel-permission').value = currentPermission.peek();
   applyChatDensity();
   const dens = $('sel-density');
   if (dens) dens.value = chatDensity.peek() || 'normal';

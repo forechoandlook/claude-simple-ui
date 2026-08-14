@@ -221,5 +221,6 @@ Legacy Node hub: `npm run gateway` → `gateway.js` (prefer the Go binary).
 | `npm start` / `npm run serve` | Production standalone |
 | `npm run build` | Bundle frontend into `dist/` |
 | `npm run client` | Edge worker (requires hub) |
+| `claude-edge status\|start\|stop\|restart\|logs` | Supervised edge (launchd / systemd). Also `claude-simple-edge`, `edge-daemon` |
 | `npm run gateway` | Legacy Node hub |
 | `npm run gateway:build` | Build Go hub via `gateway/Makefile` |

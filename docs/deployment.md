@@ -67,6 +67,23 @@ ssh gpu2 "sudo systemctl restart claude-simple-edge"
 3. 参考 `/etc/systemd/system/claude-simple-edge.service`（gpu2 上那份）改 `MACHINE_ID`，其余环境变量（`MACHINE_TOKEN`、`GATEWAY_URL`）保持一致
 4. `systemctl enable --now claude-simple-edge`，看 hub 日志 `journalctl -u claude-simple-hub` 里出现 `Machine registered: <id>` 即成功
 
+### 查看 / 控制 Edge（≥0.2.5）
+
+global 安装后 PATH 里会有：
+
+```bash
+claude-edge status      # 状态、pid、端口、最近日志
+claude-edge start
+claude-edge stop
+claude-edge restart
+claude-edge logs        # 最近 80 行
+claude-edge logs -f     # 跟踪
+claude-edge logs err    # 仅 stderr（macOS launchd）
+```
+
+`claude-simple-edge`、`edge-daemon`、`claude-edge daemon status` 是同一套命令。  
+macOS 认 `/Library/LaunchDaemons/com.claude-simple.edge.plist`，Linux 认 `claude-simple-edge.service`。需要 root 的操作会走 `sudo`。
+
 ### Edge 自动更新（≥0.2.1）
 
 `client.js` / `server.js` 默认启用 npm 自检更新：

@@ -804,9 +804,9 @@ function isShellInput(value) {
 function chatInputMaxHeight() {
   // Keep in sync with #chat-input max-height in style.css (mobile vs desktop).
   if (typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches) {
-    return 96;
+    return 72;
   }
-  return 140;
+  return 72;
 }
 
 function autoResize(el) {

@@ -13,32 +13,21 @@
   #sidebar.open { transform: translateX(0); box-shadow: 4px 0 20px rgba(0,0,0,.4); }
 
   /* Compact chat composer on phones — less height, less dead space under bar */
-  #composer-row {
-    gap: 0.35rem;
-    padding: 0.45rem 0.6rem 0.4rem !important;
-  }
+  #composer-row { padding: 0 !important; }
+  .composer-surface { min-height: 0; border-radius: 1.35rem; }
   #chat-input.chat-input,
   #chat-input {
-    min-height: 40px !important;
-    max-height: 96px !important;
-    padding: 0.5rem 0.75rem !important;
-    border-radius: 1.15rem;
+    min-height: 32px !important;
+    max-height: 72px !important;
+    padding: 0 !important;
+    border-radius: 1.15rem 1.15rem 0 0;
     /* 16px prevents iOS Safari auto-zoom on focus */
     font-size: 16px !important;
     line-height: 1.4 !important;
   }
-  #btn-opts,
-  #btn-attach,
-  #send-btn,
-  #stop-btn {
-    height: 40px !important;
-    min-height: 40px !important;
-    min-width: 40px;
-    padding-left: 0.7rem;
-    padding-right: 0.7rem;
-    border-radius: 999px;
-  }
-  #send-btn { font-weight: 650; }
+  .composer-icon-btn { width: 40px; height: 40px; font-size: 19px; }
+  .composer-send-btn, .composer-stop-btn { min-height: 40px; height: 40px; }
+  .composer-hint { display: none; }
   #chat-opts {
     padding-top: 0.35rem !important;
     padding-left: 0.55rem !important;
@@ -966,14 +955,55 @@ html.pwa-standalone .ma-panel {
 .diff-head { color: oklch(var(--bc)/.5); }
 
 /* ── Chat composer ───────────────────────────────────────────────────────── */
-/* Single outer border only — no DaisyUI nested focus ring / inner outline. */
-#composer-row #btn-opts,
-#composer-row #btn-attach,
-#composer-row #send-btn,
-#composer-row #stop-btn {
-  height: 40px;
-  min-height: 40px;
+/* One calm surface holds the prompt and its actions, like a modern messenger. */
+.composer-surface {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 16%, transparent);
+  border-radius: 1.35rem;
+  background: color-mix(in oklch, var(--color-base-100) 78%, var(--color-base-200));
+  box-shadow: 0 8px 24px color-mix(in oklch, black 12%, transparent), inset 0 1px 0 color-mix(in oklch, white 6%, transparent);
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
 }
+.composer-surface:focus-within {
+  border-color: color-mix(in oklch, var(--color-primary) 62%, transparent);
+  box-shadow: 0 8px 28px color-mix(in oklch, black 15%, transparent), 0 0 0 3px color-mix(in oklch, var(--color-primary) 12%, transparent);
+}
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: 0;
+}
+.composer-tools, .composer-submit { display: flex; align-items: center; gap: .35rem; }
+.composer-icon-btn,
+.composer-send-btn,
+.composer-stop-btn {
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform .15s ease, background .15s ease, color .15s ease;
+}
+.composer-icon-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: color-mix(in oklch, var(--color-base-content) 72%, transparent);
+  background: transparent;
+  font-size: 17px;
+  line-height: 1;
+}
+.composer-icon-btn:hover { background: color-mix(in oklch, var(--color-base-content) 9%, transparent); color: var(--color-base-content); }
+.composer-send-btn, .composer-stop-btn { height: 36px; min-height: 36px; padding: 0 .95rem; font-size: .8125rem; font-weight: 700; }
+.composer-send-btn { color: oklch(var(--pc)); background: oklch(var(--p)); box-shadow: 0 3px 10px color-mix(in oklch, oklch(var(--p)) 38%, transparent); }
+.composer-send-btn:hover { transform: translateY(-1px); background: color-mix(in oklch, oklch(var(--p)) 88%, white); }
+.composer-send-btn.btn-warning { color: oklch(var(--wc)); background: oklch(var(--wa)); box-shadow: 0 3px 10px color-mix(in oklch, oklch(var(--wa)) 38%, transparent); }
+.composer-stop-btn { color: oklch(var(--ec)); background: oklch(var(--er)); }
+.composer-hint { color: color-mix(in oklch, var(--color-base-content) 43%, transparent); font-size: 11px; }
+.composer-surface:has(.textarea-warning) { border-color: color-mix(in oklch, var(--color-warning) 65%, transparent); }
 #chat-composer.chat-drop-active {
   outline: 2px dashed color-mix(in oklch, var(--color-primary) 70%, transparent);
   outline-offset: -2px;
@@ -1030,18 +1060,18 @@ html.pwa-standalone .ma-panel {
 #chat-input.chat-input,
 #chat-input {
   width: 100%;
-  min-height: 40px;
-  max-height: 140px;
-  padding: 0.55rem 0.85rem;
-  border-radius: 0.75rem;
-  border: 1px solid color-mix(in oklch, var(--color-base-content) 16%, transparent);
-  background: var(--color-base-100);
+  min-height: 32px;
+  max-height: 72px;
+  padding: 0;
+  border: 0;
+  border-radius: 1.25rem 1.25rem 0 0;
+  background: transparent;
   color: var(--color-base-content);
   outline: none !important;
   box-shadow: none !important;
   --tw-ring-shadow: 0 0 #0000 !important;
   --tw-ring-offset-shadow: 0 0 #0000 !important;
-  transition: border-color .15s ease;
+  transition: background .15s ease;
   /* Avoid iOS inherited large text scaling making the box look oversized */
   -webkit-text-size-adjust: 100%;
 }
@@ -1112,7 +1142,7 @@ html.pwa-standalone .ma-panel {
 #chat-input:focus-visible {
   outline: none !important;
   box-shadow: none !important;
-  border-color: color-mix(in oklch, var(--color-primary) 55%, transparent);
+  border-color: transparent;
 }
 #chat-input.textarea-warning {
   border-color: color-mix(in oklch, var(--color-warning) 65%, transparent);

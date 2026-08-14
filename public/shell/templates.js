@@ -286,25 +286,34 @@ export const AppShell = (opts = {}) => {
                   <option value="full">density: full</option>
                 </select>
               </div>
-              <div id="composer-row" class="flex gap-2 items-end px-3 pt-2 pb-2">
-                <button type="button" id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options">⚙</button>
-                <button type="button" id="btn-attach" class="btn btn-ghost btn-sm px-2 text-base-content/40 hover:text-base-content flex-shrink-0" title="添加图片 / 文件">📎</button>
-                <input type="file" id="chat-file-input" class="hidden" multiple accept="image/*,*/*" tabindex="-1">
-                <textarea id="chat-input" rows="1" placeholder="问点什么…"
-                  class="chat-input flex-1 text-sm resize-none leading-relaxed"
-                  name="q"
-                  enterkeyhint="send"
-                  inputmode="text"
-                  autocomplete="off"
-                  autocorrect="off"
-                  autocapitalize="sentences"
-                  spellcheck="false"
-                  data-1p-ignore="true"
-                  data-lpignore="true"
-                  data-form-type="other"
-                  data-bwignore="true"></textarea>
-                <button type="submit" id="send-btn" class="btn btn-primary btn-sm flex-shrink-0">Send</button>
-                <button type="button" id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0">■</button>
+              <div id="composer-row" class="px-3 pt-2 pb-2">
+                <div class="composer-surface">
+                  <textarea id="chat-input" rows="1" placeholder="问点什么…"
+                    class="chat-input w-full text-sm resize-none leading-relaxed"
+                    name="q"
+                    enterkeyhint="send"
+                    inputmode="text"
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="sentences"
+                    spellcheck="false"
+                    data-1p-ignore="true"
+                    data-lpignore="true"
+                    data-form-type="other"
+                    data-bwignore="true"></textarea>
+                  <div class="composer-actions">
+                    <div class="composer-tools">
+                      <button type="button" id="btn-opts" class="composer-icon-btn" title="Options" aria-label="Options">⚙</button>
+                      <button type="button" id="btn-attach" class="composer-icon-btn" title="添加图片 / 文件" aria-label="添加图片 / 文件">📎</button>
+                      <input type="file" id="chat-file-input" class="hidden" multiple accept="image/*,*/*" tabindex="-1">
+                    </div>
+                    <div class="composer-submit">
+                      <span class="composer-hint">Enter 发送</span>
+                      <button type="submit" id="send-btn" class="composer-send-btn">Send</button>
+                      <button type="button" id="stop-btn" class="composer-stop-btn hidden" aria-label="停止生成">■</button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
             </form>
