@@ -32,7 +32,7 @@ import {
 import {
   loadAllSessions, loadWorkspaces, renderSessionList, syncSidebarChrome,
   refreshModelSelect, refreshEffortSelect, promptCustomModel,
-  scheduleActivitySearch, runActivitySearch, loadMemoryTab,
+  scheduleActivitySearch, runActivitySearch, loadMemoryTab, openMemoryFile,
 } from './shell/session-list.js';
 import { openProject, goHome, resumeSession, switchTab } from './shell/session-nav.js';
 import { showApp } from './shell/boot.js';
@@ -462,6 +462,7 @@ export function initShell(opts = {}) {
   });
 
   delegate.on('click', '#memory-refresh', loadMemoryTab);
+  delegate.on('click', '[data-memory-file]', (el) => openMemoryFile(el.dataset.memoryFile, el.dataset.memoryAgent));
   delegate.on('click', '[data-tab]', (e, el) => switchTab(el.dataset.tab));
 
   const applyRoot = async (inputId, sig) => {

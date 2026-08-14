@@ -18,6 +18,8 @@ import {
   scanAllSessions,
   loadSessionMessages,
   loadSessionMemory,
+  readSessionMemoryFile,
+  loadSessionJsonl,
   loadSessionUsage,
   searchActivity,
   groupByProject,
@@ -1008,17 +1010,35 @@ export function createApp() {
         codexHome: CODEX_HOME,
         grokHome: GROK_HOME,
       };
-      const order = [...new Set([preferred, ...ENABLED_AGENTS, 'claude', 'codex', 'grok'].filter(Boolean))];
+      // A selected session already knows its agent. Do not fall back to another
+      // agent's account-level memory (especially Codex) when that session has none.
+      const order = preferred
+        ? [preferred]
+        : [...new Set([...ENABLED_AGENTS, 'claude', 'codex', 'grok'])];
       let memory = null;
       for (const a of order) {
         memory = await loadSessionMemory(sessionId, a, opts);
         if (memory) break;
       }
-      // Memory is Claude-centric; return empty instead of 404 so the tab doesn't hard-fail
-      res.json(memory || { index: null, files: [] });
+      res.json(memory || { agent: preferred || null, files: [] });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  app.get('/api/sessions/:sessionId/memory/file', authMiddleware, async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const agent = typeof req.query.agent === 'string' ? req.query.agent : 'claude';
+      const file = typeof req.query.file === 'string' ? req.query.file : '';
+      if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
+      const row = await readSessionMemoryFile(sessionId, agent, file, {
+        claudeConfigDirs: CLAUDE_CONFIG_DIRS, codexHome: CODEX_HOME, grokHome: GROK_HOME,
+      });
+      if (!row) return res.status(404).json({ error: 'Memory file not found' });
+      res.setHeader('Cache-Control', 'private, max-age=30');
+      res.json(row);
+    } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.get('/api/projects/:id/git/log', authMiddleware, async (req, res) => {
@@ -1044,6 +1064,7 @@ export function createApp() {
     listSessions,
     searchActivity,
     loadSessionMessages,
+    loadSessionJsonl,
     groupByProject,
     toClientSession,
     getProjectNotesStore: loadProjectNotes,

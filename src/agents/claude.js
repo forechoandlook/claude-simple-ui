@@ -23,7 +23,7 @@ export async function runClaude(command, options, send, { cliPath, activeSession
   const env = { ...process.env };
   if (options.configDir) env.CLAUDE_CONFIG_DIR = options.configDir;
 
-  const permissionMode = options.permissionMode || 'default';
+  const permissionMode = options.permissionMode || 'bypassPermissions';
   const autoApprove = permissionMode === 'bypassPermissions'
     || permissionMode === 'acceptEdits'
     || permissionMode === 'auto'

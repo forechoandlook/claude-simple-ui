@@ -1187,40 +1187,107 @@ export async function loadSessionMemory(sessionId, agent, { claudeConfigDirs, co
   if (agent === 'grok') {
     const dir = await findGrokSessionDir(sessionId, grokHome);
     if (!dir) return null;
-    // Grok may store memory differently; best-effort empty
-    return { index: null, files: [] };
+    return listMemoryFiles(path.join(dir, 'memory'), 'grok');
   }
   if (agent === 'codex') {
-    return { index: null, files: [] };
+    // Codex memory is account-level rather than nested beneath each rollout.
+    const home = codexHome || path.join(os.homedir(), '.codex');
+    return listMemoryFiles(path.join(home, 'memories'), 'codex', { codexRoot: true });
   }
   const file = await findClaudeSessionFile(sessionId, claudeConfigDirs);
   if (!file) return null;
-  return readProjectMemory(path.dirname(file));
+  return listMemoryFiles(path.dirname(file), 'claude', { claudeProject: true });
 }
 
-export async function readProjectMemory(projectDir) {
-  const memoryDir = path.join(projectDir, 'memory');
-  let index = null;
-  try { index = await fs.readFile(path.join(projectDir, 'MEMORY.md'), 'utf8'); }
-  catch {}
-
+async function listMemoryFiles(root, agent, opts = {}) {
   const files = [];
-  let entries = [];
-  try { entries = await fs.readdir(memoryDir, { withFileTypes: true }); }
-  catch {}
-  await Promise.all(
-    entries
-      .filter(e => e.isFile() && e.name.endsWith('.md'))
-      .map(async e => {
-        try {
-          const content = await fs.readFile(path.join(memoryDir, e.name), 'utf8');
-          const stat = await fs.stat(path.join(memoryDir, e.name));
-          files.push({ name: e.name, content, updatedAt: stat.mtimeMs });
-        } catch {}
-      })
-  );
+  const add = async (absolute, id, scope) => {
+    try {
+      const stat = await fs.stat(absolute);
+      if (stat.isFile()) files.push({ id, name: id, agent, scope, updatedAt: stat.mtimeMs, size: stat.size });
+    } catch {}
+  };
+  if (opts.claudeProject) {
+    await add(path.join(root, 'MEMORY.md'), 'MEMORY.md', 'project');
+    let entries = [];
+    try { entries = await fs.readdir(path.join(root, 'memory'), { withFileTypes: true }); } catch {}
+    await Promise.all(entries.filter(e => e.isFile() && e.name.endsWith('.md'))
+      .map(e => add(path.join(root, 'memory', e.name), `memory/${e.name}`, 'project')));
+  } else if (opts.codexRoot) {
+    // Durable Codex memory entry points; rollout summaries and skill packages
+    // remain out of this concise tab.
+    await Promise.all([
+      add(path.join(root, 'MEMORY.md'), 'MEMORY.md', 'account'),
+      add(path.join(root, 'memory_summary.md'), 'memory_summary.md', 'account'),
+    ]);
+    let entries = [];
+    const notes = path.join(root, 'extensions', 'ad_hoc', 'notes');
+    try { entries = await fs.readdir(notes, { withFileTypes: true }); } catch {}
+    await Promise.all(entries.filter(e => e.isFile() && e.name.endsWith('.md'))
+      .map(e => add(path.join(notes, e.name), `extensions/ad_hoc/notes/${e.name}`, 'account')));
+  } else {
+    let entries = [];
+    try { entries = await fs.readdir(root, { withFileTypes: true }); } catch {}
+    await Promise.all(entries.filter(e => e.isFile() && e.name.endsWith('.md'))
+      .map(e => add(path.join(root, e.name), e.name, 'session')));
+  }
   files.sort((a, b) => a.name.localeCompare(b.name));
-  return { index, files };
+  return { agent, files };
+}
+
+/** Read one previously-listed memory file. File ids are relative and validated. */
+export async function readSessionMemoryFile(sessionId, agent, fileId, opts) {
+  const id = String(fileId || '').replaceAll('\\', '/');
+  if (!id || id.startsWith('/') || id.split('/').some(p => p === '..' || !p)) return null;
+  let root;
+  if (agent === 'codex') root = path.join(opts.codexHome || path.join(os.homedir(), '.codex'), 'memories');
+  else if (agent === 'grok') {
+    const dir = await findGrokSessionDir(sessionId, opts.grokHome);
+    if (!dir) return null;
+    root = path.join(dir, 'memory');
+  } else {
+    const file = await findClaudeSessionFile(sessionId, opts.claudeConfigDirs);
+    if (!file) return null;
+    root = path.dirname(file);
+  }
+  const listed = await loadSessionMemory(sessionId, agent, opts);
+  const meta = listed?.files?.find(f => f.id === id);
+  if (!meta) return null;
+  try { return { ...meta, content: await fs.readFile(path.resolve(root, id), 'utf8') }; }
+  catch { return null; }
+}
+
+/** Return bounded raw JSONL for a particular agent session, for Meta Agent analysis. */
+export async function loadSessionJsonl(sessionId, agent, { claudeConfigDirs, codexHome, grokHome }, { offset = 0, maxLines = 500 } = {}) {
+  if (!agent) {
+    for (const candidate of ['claude', 'codex', 'grok']) {
+      const found = await loadSessionJsonl(sessionId, candidate, { claudeConfigDirs, codexHome, grokHome }, { offset, maxLines });
+      if (found) return found;
+    }
+    return null;
+  }
+  const a = (agent || 'claude').toLowerCase();
+  let file;
+  if (a === 'codex') file = await findCodexSessionFile(sessionId, codexHome);
+  else if (a === 'grok') {
+    const dir = await findGrokSessionDir(sessionId, grokHome);
+    file = dir ? path.join(dir, 'chat_history.jsonl') : null;
+  } else file = await findClaudeSessionFile(sessionId, claudeConfigDirs);
+  if (!file) return null;
+  const start = Math.max(0, Number(offset) || 0);
+  const limit = Math.min(Math.max(1, Number(maxLines) || 500), 2000);
+  const lines = [];
+  let n = 0;
+  let hasMore = false;
+  const stream = fsSync.createReadStream(file, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (n++ < start) continue;
+    if (lines.length >= limit) { hasMore = true; rl.close(); stream.destroy(); break; }
+    lines.push(line);
+  }
+  const stat = await fs.stat(file).catch(() => null);
+  return { agent: a, fileName: path.basename(file), offset: start, lines, nextOffset: start + lines.length, truncated: hasMore, size: stat?.size || 0 };
 }
 
 export async function getSessionMeta(sessionId, agent, { claudeConfigDirs, codexHome, grokHome }) {
@@ -1505,4 +1572,3 @@ export async function convertSession(sourceSessionId, sourceAgent, targetAgent, 
 
   return { targetSessionId };
 }
-

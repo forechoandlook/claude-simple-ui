@@ -754,7 +754,7 @@ export function sendMessage() {
         configDir: ctx.configDir,
         model:     currentModel.peek(),
         ...(effort     && { effort }),
-        ...(permission && permission !== 'default' && { permissionMode: permission }),
+        ...(permission && { permissionMode: permission }),
         ...(permission === 'bypassPermissions' && { allowDangerouslySkipPermissions: true }),
       },
     });

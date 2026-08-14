@@ -22,8 +22,9 @@ import { createDeltaBatcher } from './stream-batch.js';
 
 function mapPermission(permissionMode, allowBypass) {
   if (allowBypass || permissionMode === 'bypassPermissions') return 'bypassPermissions';
-  if (permissionMode && permissionMode !== 'default') return permissionMode;
-  return null;
+  if (permissionMode == null) return 'bypassPermissions';
+  if (permissionMode === 'default') return null;
+  return permissionMode;
 }
 
 function buildArgs(command, options) {

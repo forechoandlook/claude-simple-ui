@@ -21,9 +21,10 @@ Meta Agent 是 **与 Claude / Codex / Grok 会话平行** 的「工作助手」�
 
 1. **活动复盘**：根据本机 agent 会话写日报 / 问答「我做了啥」
 2. **项目查询**：会话、项目 notes、git、文件
-3. **代码试验**：`write_file` + `run_command`（有危险命令拦截）
-4. **看图（VLM）**：粘贴图片 → 路径引用 → 按需 `analyze_images`
-5. **历史与 Resume**：同一 `sessionId` 下完整 tool / VLM 上下文可继续聊
+3. **原始会话分析**：按 sessionId 读取 Claude / Codex / Grok 的原始 JSONL，分析事件、工具调用和失败原因
+4. **代码试验**：`write_file` + `run_command`（有危险命令拦截）
+5. **看图（VLM）**：粘贴图片 → 路径引用 → 按需 `analyze_images`
+6. **历史与 Resume**：同一 `sessionId` 下完整 tool / VLM 上下文可继续聊
 
 **不做**：
 
@@ -299,6 +300,8 @@ if (d?.tool_calls) { … }
 | GET | `/api/ai/digest` | 活动 digest |
 
 图片上传复用：`POST /api/upload-image`。
+
+`get_session_jsonl` 是 Meta Agent 的工具：传入 `sessionId`、`agent`、可选 `offset` / `maxLines`，返回原始 JSONL 行供当前对话分析；单次最多 2,000 行，避免把整个会话一次塞入模型上下文。
 
 ---
 

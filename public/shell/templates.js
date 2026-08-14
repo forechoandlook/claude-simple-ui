@@ -278,7 +278,7 @@ export const AppShell = (opts = {}) => {
                   <option value="acceptEdits">acceptEdits</option>
                   <option value="auto">auto</option>
                   <option value="plan">plan</option>
-                  <option value="bypassPermissions">⚠ bypass all</option>
+                  <option value="bypassPermissions" selected>⚠ bypass all</option>
                 </select>
                 <select id="sel-density" class="select select-xs select-bordered text-xs" title="Chat density — how tools are shown">
                   <option value="clean">density: clean</option>
@@ -348,7 +348,7 @@ export const AppShell = (opts = {}) => {
           </div>
           <div id="tab-memory" class="hidden flex-col flex-1 overflow-hidden">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
-              <span class="text-xs text-base-content/40 flex-shrink-0">🧠 Project memory</span>
+              <span class="text-xs text-base-content/40 flex-shrink-0">🧠 Agent memory</span>
               <span class="flex-1"></span>
               <button id="memory-refresh" class="btn btn-ghost btn-xs text-xs">Refresh</button>
             </div>

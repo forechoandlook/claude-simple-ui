@@ -18,11 +18,9 @@ export const wsStatus       = signal('idle');
 export const currentAgent      = signal(localStorage.getItem('agent') || 'claude'); // 'claude'|'codex'|'grok'
 export const currentModel      = signal(localStorage.getItem('model') || 'claude-sonnet-4-5');
 export const currentEffort     = signal('');
-// Codex is intentionally trusted by default; users can still choose another
-// mode from the expanded composer options before starting a turn.
-export const currentPermission = signal(
-  currentAgent.peek() === 'codex' ? 'bypassPermissions' : 'default'
-); // 'default'|'acceptEdits'|'bypassPermissions'|'plan'|'auto'
+// All local agents are trusted by default; users can still choose another mode
+// from the expanded composer options before starting a turn.
+export const currentPermission = signal('bypassPermissions'); // 'default'|'acceptEdits'|'bypassPermissions'|'plan'|'auto'
 export const filesRoot      = signal(''); // custom root override for Files tab
 export const gitRoot        = signal(''); // custom root override for Git tab
 export const agentsMeta     = signal(null); // from /api/agents (dynamic model lists)
@@ -251,7 +249,7 @@ export function setAgent(agent) {
   const a = (agent || 'claude').toLowerCase();
   currentAgent.value = a;
   localStorage.setItem('agent', a);
-  currentPermission.value = a === 'codex' ? 'bypassPermissions' : 'default';
+  currentPermission.value = 'bypassPermissions';
   const permissionSelect = typeof document === 'undefined' ? null : document.getElementById('sel-permission');
   if (permissionSelect) permissionSelect.value = currentPermission.peek();
   const models = getModelsForAgent(a);

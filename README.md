@@ -213,6 +213,8 @@ Legacy Node hub: `npm run gateway` → `gateway.js` (prefer the Go binary).
 | Codex  | `codex exec --json` / `codex exec resume <id>`    | thread_id         | `~/.codex/sessions/**/rollout-*.jsonl` |
 | Grok   | `grok -p … --output-format streaming-json`         | `--resume <id>` | `~/.grok/sessions/<cwd>/<id>/`         |
 
+The Memory tab lists files for the selected session's agent and loads their contents on click: Claude project memory, Codex account memory, or Grok session memory. Meta Agent can use `get_session_jsonl` to inspect a specific agent session's raw JSONL in bounded pages.
+
 ## Scripts
 
 | Script | Description |

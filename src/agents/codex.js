@@ -12,6 +12,7 @@ import crypto from 'crypto';
  */
 
 function mapPermissionToMode(permissionMode) {
+  if (permissionMode == null) return 'yolo';
   switch (permissionMode) {
     case 'acceptEdits':
     case 'auto':

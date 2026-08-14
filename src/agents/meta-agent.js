@@ -41,7 +41,7 @@ export const AI_DEFAULTS = {
 export const DEFAULT_SYSTEM = `你是 Claude Simple UI 的内置工作助手（Meta Agent）。你能访问本机上的 Claude / Codex / Grok 会话、项目笔记、Git 与文件，并生成「我做了啥」的工作报告。
 
 规则：
-1. 需要会话 id / 项目路径时，先 list_projects 或 search_activity / list_sessions，再深入 get_session_summary。
+1. 需要会话 id / 项目路径时，先 list_projects 或 search_activity / list_sessions，再深入 get_session_summary。用户要求分析某个 session 的原始记录时，调用 get_session_jsonl；它返回保留原始结构的 JSONL 行，可分页继续读取。
 2. 回答要具体：引用项目路径、会话标题、时间范围；不确定就再查。
 3. 写日报/周报用 generate_activity_digest 拉快照，再组织成清晰 Markdown（亮点、按项目、未完成、建议）。
 4. 改文件或跑命令前说明意图；危险命令拒绝（rm -rf /、格式化磁盘等）。
@@ -129,6 +129,23 @@ const TOOLS = [
           sessionId: { type: 'string' },
           agent: { type: 'string' },
           maxMessages: { type: 'integer', description: '默认 30' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_session_jsonl',
+      description: '读取 Claude/Codex/Grok 指定会话的原始 JSONL 行，用于逐事件、工具调用或失败原因分析；内容可能敏感，只在当前回答中使用',
+      parameters: {
+        type: 'object',
+        required: ['sessionId'],
+        properties: {
+          sessionId: { type: 'string' },
+          agent: { type: 'string', enum: ['claude', 'codex', 'grok'], description: '建议明确指定来源 agent' },
+          offset: { type: 'integer', description: '从第几行开始，默认 0' },
+          maxLines: { type: 'integer', description: '每次最多 2000 行，默认 500' },
         },
       },
     },
@@ -399,6 +416,7 @@ export function createMetaAgent(deps) {
     listSessions,
     searchActivity,
     loadSessionMessages,
+    loadSessionJsonl,
     groupByProject,
     toClientSession,
     getProjectNotesStore,
@@ -1440,6 +1458,17 @@ export function createMetaAgent(deps) {
           total: msgs.length,
           messages: summary,
         };
+      }
+      case 'get_session_jsonl': {
+        const sid = args.sessionId || args.id;
+        if (!sid) return { error: 'sessionId required' };
+        if (!loadSessionJsonl) return { error: 'raw session reader unavailable' };
+        const result = await loadSessionJsonl(sid, args.agent || null, sessionOpts(), {
+          offset: args.offset,
+          maxLines: args.maxLines,
+        });
+        if (!result) return { error: 'session JSONL not found' };
+        return result;
       }
       case 'get_project_notes': {
         const store = await getProjectNotesStore();

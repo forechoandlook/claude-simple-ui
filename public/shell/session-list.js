@@ -430,7 +430,7 @@ export function mdToHtml(text) {
   }
 }
 
-// Load the persistent memory for the currently open session into the Memory tab.
+// Memory is shown as an agent-specific file list. Content is loaded on click.
 export async function loadMemoryTab() {
   const body = $('memory-area');
   if (!body) return;
@@ -440,22 +440,30 @@ export async function loadMemoryTab() {
   }
   body.innerHTML = '<div class="p-4 text-xs text-base-content/40">Loading…</div>';
   try {
-    const q = new URLSearchParams({ agent: ctx.agent || currentAgent.peek() || 'claude' });
+    const agent = ctx.agent || currentAgent.peek() || 'claude';
+    const q = new URLSearchParams({ agent });
     const mem = await api('GET', `/api/sessions/${ctx.sessionId}/memory?${q}`);
-    const parts = [];
-    if (mem.index) {
-      parts.push(`<div class="mb-4"><div class="text-[11px] uppercase tracking-wide text-base-content/40 mb-1">Index (MEMORY.md)</div>
-                  <div class="md">${mdToHtml(mem.index)}</div></div>`);
+    const files = mem.files || [];
+    if (!files.length) {
+      body.innerHTML = '<div class="p-4 text-base-content/40 text-xs">No memory files available for this agent/session.</div>';
+      return;
     }
-    for (const f of (mem.files || [])) {
-      parts.push(`<div class="mb-3 border border-base-300 rounded-lg overflow-hidden">
-                    <div class="px-3 py-1.5 bg-base-300/50 text-xs font-mono text-base-content/70">${esc(f.name)}</div>
-                    <div class="px-3 py-2 md">${mdToHtml(f.content)}</div>
-                  </div>`);
-    }
-    if (!parts.length) parts.push('<div class="text-base-content/40 text-xs">No memory saved for this project yet.</div>');
-    body.innerHTML = `<div class="p-4">${parts.join('')}</div>`;
+    body.innerHTML = `<div class="p-3 text-[11px] text-base-content/45">${esc(agent)} · ${files.length} memory file${files.length === 1 ? '' : 's'} · click to open</div>
+      <div class="px-3 pb-4 flex flex-col gap-1">${files.map(f => `<button type="button" class="memory-file text-left px-3 py-2 rounded-lg border border-base-300 hover:border-primary hover:bg-primary/5" data-memory-file="${esc(f.id)}" data-memory-agent="${esc(agent)}"><span class="font-mono text-xs">${esc(f.name)}</span><span class="ml-2 text-[10px] text-base-content/40">${esc(f.scope || '')}</span></button>`).join('')}<div id="memory-file-content"></div></div>`;
   } catch (e) {
     body.innerHTML = `<div class="p-4 text-error text-xs">${esc(e?.message ?? String(e))}</div>`;
+  }
+}
+
+export async function openMemoryFile(fileId, agent) {
+  const out = $('memory-file-content');
+  if (!out || !ctx.sessionId || !fileId) return;
+  out.innerHTML = '<div class="p-3 text-xs text-base-content/40">Loading file…</div>';
+  try {
+    const q = new URLSearchParams({ agent: agent || ctx.agent || currentAgent.peek() || 'claude', file: fileId });
+    const row = await api('GET', `/api/sessions/${ctx.sessionId}/memory/file?${q}`);
+    out.innerHTML = `<div class="mt-2 border border-base-300 rounded-lg overflow-hidden"><div class="px-3 py-1.5 bg-base-300/50 text-xs font-mono">${esc(row.name)}</div><div class="px-3 py-2 md">${mdToHtml(row.content)}</div></div>`;
+  } catch (e) {
+    out.innerHTML = `<div class="mt-2 p-3 text-error text-xs">${esc(e?.message ?? String(e))}</div>`;
   }
 }
