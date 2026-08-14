@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 )
@@ -103,6 +104,42 @@ func (m *ctrlMsg) bodyBytes() []byte {
 		}
 	}
 	return []byte(m.Body)
+}
+
+// needsBase64ReqBody reports whether a request body must be base64 on the
+// control channel. JSON cannot carry invalid UTF-8; string(b) + marshal would
+// corrupt image/file uploads (POST /api/upload-image, etc.).
+func needsBase64ReqBody(contentType string, b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	if ct == "" {
+		return !utf8.Valid(b)
+	}
+	if strings.HasPrefix(ct, "text/") ||
+		ct == "application/json" ||
+		ct == "application/javascript" ||
+		ct == "application/x-www-form-urlencoded" ||
+		strings.HasSuffix(ct, "+json") ||
+		strings.HasSuffix(ct, "+xml") {
+		return !utf8.Valid(b)
+	}
+	return true
+}
+
+// encodeProxyBody prepares a request body for the machine control JSON channel.
+func encodeProxyBody(contentType string, b []byte) (body, encoding string) {
+	if len(b) == 0 {
+		return "", ""
+	}
+	if needsBase64ReqBody(contentType, b) {
+		return base64.StdEncoding.EncodeToString(b), "base64"
+	}
+	return string(b), ""
 }
 
 // ── machine registry ──────────────────────────────────────────────────────────
@@ -222,7 +259,7 @@ func (g *gateway) listMachines() []map[string]any {
 
 // ── HTTP proxy via control channel ────────────────────────────────────────────
 
-func (g *gateway) forwardHTTP(machineID, method, path string, headers map[string]string, body string) (*ctrlMsg, error) {
+func (g *gateway) forwardHTTP(machineID, method, path string, headers map[string]string, body, bodyEncoding string) (*ctrlMsg, error) {
 	m := g.getMachine(machineID)
 	if m == nil {
 		return nil, fmt.Errorf(`machine "%s" not connected`, machineID)
@@ -239,12 +276,13 @@ func (g *gateway) forwardHTTP(machineID, method, path string, headers map[string
 	}()
 
 	err := m.send(ctrlMsg{
-		Type:    "http-req",
-		ReqID:   reqID,
-		Method:  method,
-		Path:    path,
-		Headers: headers,
-		Body:    body,
+		Type:     "http-req",
+		ReqID:    reqID,
+		Method:   method,
+		Path:     path,
+		Headers:  headers,
+		Body:     body,
+		Encoding: bodyEncoding,
 	})
 	if err != nil {
 		return nil, err
@@ -266,7 +304,7 @@ func (g *gateway) forwardHTTP(machineID, method, path string, headers map[string
 // (status+headers+full body — used for ordinary requests) or, for streamed
 // responses, "http-res-start" (status+headers) followed by zero or more
 // "http-chunk" messages and a terminating "http-end".
-func (g *gateway) forwardHTTPStream(machineID, method, path string, headers map[string]string, body string, w http.ResponseWriter) error {
+func (g *gateway) forwardHTTPStream(machineID, method, path string, headers map[string]string, body, bodyEncoding string, w http.ResponseWriter) error {
 	m := g.getMachine(machineID)
 	if m == nil {
 		return fmt.Errorf(`machine "%s" not connected`, machineID)
@@ -283,12 +321,13 @@ func (g *gateway) forwardHTTPStream(machineID, method, path string, headers map[
 	}()
 
 	if err := m.send(ctrlMsg{
-		Type:    "http-req",
-		ReqID:   reqID,
-		Method:  method,
-		Path:    path,
-		Headers: headers,
-		Body:    body,
+		Type:     "http-req",
+		ReqID:    reqID,
+		Method:   method,
+		Path:     path,
+		Headers:  headers,
+		Body:     body,
+		Encoding: bodyEncoding,
 	}); err != nil {
 		return err
 	}
@@ -504,7 +543,7 @@ func (g *gateway) handleMachineHTTP(w http.ResponseWriter, r *http.Request) {
 		fwdPath += "?" + r.URL.RawQuery
 	}
 
-	var bodyStr string
+	var bodyStr, bodyEncoding string
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		limited := io.LimitReader(r.Body, maxBodyBytes+1)
 		b, err := io.ReadAll(limited)
@@ -516,7 +555,7 @@ func (g *gateway) handleMachineHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		bodyStr = string(b)
+		bodyStr, bodyEncoding = encodeProxyBody(r.Header.Get("Content-Type"), b)
 	}
 
 	headers := map[string]string{}
@@ -532,7 +571,7 @@ func (g *gateway) handleMachineHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	headers["Host"] = "localhost"
 
-	if err := g.forwardHTTPStream(machineID, r.Method, fwdPath, headers, bodyStr, w); err != nil {
+	if err := g.forwardHTTPStream(machineID, r.Method, fwdPath, headers, bodyStr, bodyEncoding, w); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})

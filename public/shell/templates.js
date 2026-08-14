@@ -239,6 +239,7 @@ export const AppShell = (opts = {}) => {
             </div>
             <div id="permission-requests"></div>
             <div id="chat-composer" class="flex flex-col border-t border-base-300 bg-base-200 flex-shrink-0">
+              <div id="chat-attach-bar" class="hidden flex flex-wrap gap-1.5 px-3 pt-2"></div>
               <div id="chat-opts" class="hidden flex items-center gap-1.5 px-3 pt-2 flex-wrap">
                 <select id="sel-agent" class="select select-xs select-bordered text-xs font-semibold" title="Agent">
                   <option value="claude">Claude</option>
@@ -283,8 +284,10 @@ export const AppShell = (opts = {}) => {
                 </select>
               </div>
               <div id="composer-row" class="flex gap-2 items-end px-3 pt-2 pb-2">
-                <button id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options">⚙</button>
-                <textarea id="chat-input" rows="1" placeholder="Ask… (!cmd shell · ⌘↵ send)"
+                <button type="button" id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options">⚙</button>
+                <button type="button" id="btn-attach" class="btn btn-ghost btn-sm px-2 text-base-content/40 hover:text-base-content flex-shrink-0" title="添加图片 / 文件">📎</button>
+                <input type="file" id="chat-file-input" class="hidden" multiple accept="image/*,*/*">
+                <textarea id="chat-input" rows="1" placeholder="Ask… (📎 图片/文件 · !cmd · ⌘↵)"
                   class="chat-input flex-1 text-sm resize-none leading-relaxed"
                   name="agent-chat-message"
                   autocomplete="off"
@@ -295,8 +298,8 @@ export const AppShell = (opts = {}) => {
                   data-lpignore="true"
                   data-form-type="other"
                   data-bwignore="true"></textarea>
-                <button id="send-btn" class="btn btn-primary btn-sm flex-shrink-0">Send</button>
-                <button id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0">■</button>
+                <button type="button" id="send-btn" class="btn btn-primary btn-sm flex-shrink-0">Send</button>
+                <button type="button" id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0">■</button>
               </div>
             </div>
           </div>

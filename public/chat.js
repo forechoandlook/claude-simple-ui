@@ -3,7 +3,7 @@ import { watch, delegate, esc, $ } from './lib.js';
 import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEffort, currentPermission,
          currentAgent, setAgent, AGENT_LABELS, getDefaultModel, getModelsForAgent, getEffortsForModel,
          addCustomModel, chatDensity, wsStatus } from './state.js';
-import { sendWs, api, flushWsQueue, clearWsQueue } from './api.js';
+import { sendWs, api, authHeaders, flushWsQueue, clearWsQueue } from './api.js';
 import { initWakeLock, setWakeLockDesired } from './wake-lock.js';
 
 function assistantLabel() {
@@ -706,6 +706,7 @@ export function sendMessage() {
     input.value = '';
     autoResize(input);
     updateInputMode('');
+    clearPendingAttachments();
     appendSystemMsg(`已排队下一条，当前回复结束后发送：${text.length > 80 ? text.slice(0, 80) + '…' : text}`);
     return;
   }
@@ -713,6 +714,7 @@ export function sendMessage() {
   input.value = '';
   autoResize(input);
   updateInputMode('');
+  clearPendingAttachments();
 
   if (text.startsWith('/')) {
     if (handleSlashCommand(text)) {
@@ -899,74 +901,195 @@ export function appendMsg(role, _label, text, opts = {}) {
 
 export function appendSystemMsg(text) { appendMsg('system', '', text); }
 
-async function uploadImageBlob(blob, filename) {
+/** Pending chat attachments shown above the input (paths also inserted into text). */
+const pendingAttachments = [];
+let attachSeq = 0;
+let chatDropBound = false;
+
+async function uploadChatBlob(blob, filename) {
+  const name = filename || `upload-${Date.now()}`;
+  const headers = authHeaders({ 'x-filename': name });
+  delete headers['Content-Type'];
+  // Prefer file MIME so hub base64-encodes binary uploads correctly.
+  if (blob?.type && !headers['Content-Type'] && !headers['content-type']) {
+    headers['Content-Type'] = blob.type;
+  }
   const res = await fetch('/api/upload-image', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${ctx.token}`, 'x-filename': filename },
+    headers,
     body: blob,
   });
-  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-  return (await res.json()).path;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Upload failed: ${res.status}`);
+  }
+  const data = await res.json();
+  if (!data?.path) throw new Error('upload returned no path');
+  return data.path;
 }
 
 function insertAtCursor(ta, text) {
-  const s = ta.selectionStart, e = ta.selectionEnd;
-  ta.value = ta.value.slice(0, s) + text + ta.value.slice(e);
-  ta.selectionStart = ta.selectionEnd = s + text.length;
+  if (!ta) return;
+  const s = ta.selectionStart ?? ta.value.length;
+  const e = ta.selectionEnd ?? ta.value.length;
+  const padBefore = s > 0 && ta.value[s - 1] !== '\n' ? '\n' : '';
+  const insert = padBefore + text + '\n';
+  ta.value = ta.value.slice(0, s) + insert + ta.value.slice(e);
+  ta.selectionStart = ta.selectionEnd = s + insert.length;
   ta.dispatchEvent(new Event('input'));
+}
+
+function isImageFile(file) {
+  if (!file) return false;
+  if (file.type && file.type.startsWith('image/')) return true;
+  return /\.(png|jpe?g|gif|webp|bmp|svg|heic|heif|avif)$/i.test(file.name || '');
+}
+
+function makeAttachRef(file, path) {
+  const name = file?.name || path.split('/').pop() || 'file';
+  if (isImageFile(file)) {
+    attachSeq += 1;
+    const label = `img${attachSeq}`;
+    return { ref: `![${label}](${path})`, label, kind: 'image' };
+  }
+  attachSeq += 1;
+  const label = `file${attachSeq}`;
+  return { ref: `[${label}](${path})`, label, kind: 'file' };
+}
+
+function clearPendingAttachments() {
+  for (const item of pendingAttachments) {
+    if (item.previewUrl) {
+      try { URL.revokeObjectURL(item.previewUrl); } catch { /* ignore */ }
+    }
+  }
+  pendingAttachments.length = 0;
+  renderAttachBar();
+}
+
+function renderAttachBar() {
+  const bar = $('chat-attach-bar');
+  if (!bar) return;
+  if (!pendingAttachments.length) {
+    bar.classList.add('hidden');
+    bar.innerHTML = '';
+    return;
+  }
+  bar.classList.remove('hidden');
+  bar.innerHTML = pendingAttachments.map((item, i) => `
+    <div class="chat-thumb relative" title="${esc(item.ref || item.path)}">
+      ${item.previewUrl
+        ? `<img src="${item.previewUrl}" alt="${esc(item.label || 'img')}">`
+        : `<span class="chat-thumb-path">${esc(item.label || item.name || 'file')}</span>`}
+      <span class="chat-thumb-label">${esc(item.label || item.kind || '')}</span>
+      <button type="button" class="chat-thumb-x" data-rm-attach="${i}" aria-label="remove">✕</button>
+    </div>`).join('');
+}
+
+async function addChatAttachment(file) {
+  if (!file) return;
+  const name = file.name || `upload-${Date.now()}`;
+  const path = await uploadChatBlob(file, name);
+  const { ref, label, kind } = makeAttachRef(file, path);
+  let previewUrl = '';
+  if (kind === 'image') {
+    try { previewUrl = URL.createObjectURL(file); } catch { /* ignore */ }
+  }
+  pendingAttachments.push({ path, ref, label, kind, name, previewUrl });
+  renderAttachBar();
+  insertAtCursor($('chat-input'), ref);
+  return path;
+}
+
+async function uploadFilesList(fileList) {
+  const files = [...(fileList || [])].filter(Boolean);
+  if (!files.length) return;
+  const ta = $('chat-input');
+  if (ta) ta.disabled = true;
+  try {
+    for (const file of files) {
+      try {
+        await addChatAttachment(file);
+      } catch (err) {
+        appendSystemMsg(`上传失败 ${file.name || 'file'}: ${err.message}`);
+      }
+    }
+  } finally {
+    if (ta) {
+      ta.disabled = false;
+      ta.focus();
+    }
+  }
+}
+
+/** Open file picker (images + any files). */
+export function attachImage() {
+  const input = $('chat-file-input');
+  if (input) {
+    input.value = '';
+    input.click();
+    return;
+  }
+  const fallback = document.createElement('input');
+  fallback.type = 'file';
+  fallback.accept = 'image/*,*/*';
+  fallback.multiple = true;
+  fallback.addEventListener('change', () => uploadFilesList(fallback.files));
+  fallback.click();
 }
 
 export function initImagePaste() {
   document.addEventListener('paste', async e => {
     const ta = $('chat-input');
-    if (!ta || document.activeElement !== ta) return;
-    const items = [...(e.clipboardData?.items || [])];
-    const imageItem = items.find(i => i.type.startsWith('image/'));
-    if (!imageItem) return;
-    e.preventDefault();
-    const blob = imageItem.getAsFile();
-    const ext  = imageItem.type.split('/')[1] || 'png';
-    const name = `paste-${Date.now()}.${ext}`;
-    ta.disabled = true;
-    try {
-      const path = await uploadImageBlob(blob, name);
-      insertAtCursor(ta, `![${name}](${path})`);
-    } catch (err) {
-      appendSystemMsg(`Image paste failed: ${err.message}`);
-    } finally {
-      ta.disabled = false;
-      ta.focus();
-    }
-  });
-}
+    if (!ta) return;
+    // Accept paste when focusing input, or when composer is active
+    const composer = $('chat-composer');
+    const inComposer = composer && (composer.contains(document.activeElement) || document.activeElement === ta);
+    if (!inComposer && document.activeElement !== ta) return;
 
-export function attachImage() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.multiple = true;
-  input.addEventListener('change', async () => {
-    for (const file of input.files) {
-      appendSystemMsg(`Uploading ${file.name}…`);
-      try {
-        const res = await fetch('/api/upload-image', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${ctx.token}`, 'x-filename': file.name },
-          body: file,
-        });
-        const { path } = await res.json();
-        // Insert path reference into chat input
-        const ta = $('chat-input');
-        if (ta) {
-          ta.value += (ta.value ? '\n' : '') + path;
-          ta.dispatchEvent(new Event('input'));
-          ta.focus();
-        }
-        appendSystemMsg(`📎 ${path}`);
-      } catch (e) { appendSystemMsg(`Upload failed: ${e.message}`); }
+    const items = [...(e.clipboardData?.items || [])];
+    const files = [];
+    for (const it of items) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    // Prefer image paste; also allow non-image files from clipboard when present
+    const imageFiles = files.filter(f => isImageFile(f));
+    const pick = imageFiles.length ? imageFiles : files;
+    if (!pick.length) return;
+    e.preventDefault();
+    await uploadFilesList(pick);
+  });
+
+  if (chatDropBound) return;
+  chatDropBound = true;
+  document.addEventListener('dragover', e => {
+    const composer = $('chat-composer');
+    if (!composer || !e.dataTransfer?.types?.includes('Files')) return;
+    if (!composer.contains(e.target) && e.target !== composer) return;
+    e.preventDefault();
+    composer.classList.add('chat-drop-active');
+  });
+  document.addEventListener('dragleave', e => {
+    const composer = $('chat-composer');
+    if (!composer) return;
+    if (e.target === composer || composer.contains(e.target)) {
+      // leaving to outside
+      if (!composer.contains(e.relatedTarget)) composer.classList.remove('chat-drop-active');
     }
   });
-  input.click();
+  document.addEventListener('drop', async e => {
+    const composer = $('chat-composer');
+    if (!composer) return;
+    composer.classList.remove('chat-drop-active');
+    if (!composer.contains(e.target) && e.target !== composer) return;
+    const files = [...(e.dataTransfer?.files || [])];
+    if (!files.length) return;
+    e.preventDefault();
+    await uploadFilesList(files);
+  });
 }
 
 function fmtNum(n) { return n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
@@ -1314,6 +1437,34 @@ export function initChat() {
     if (send) { e.preventDefault(); sendMessage(); }
   });
   delegate.on('input',   '#chat-input', (e, el) => { autoResize(el); updateInputMode(el.value); });
+
+  // Attach images / files
+  delegate.on('click', '#btn-attach', e => {
+    e.preventDefault();
+    attachImage();
+  });
+  delegate.on('change', '#chat-file-input', (e, el) => {
+    const files = el?.files;
+    if (files?.length) uploadFilesList(files);
+    if (el) el.value = '';
+  });
+  delegate.on('click', '[data-rm-attach]', (e, el) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const i = parseInt(el.dataset.rmAttach, 10);
+    if (Number.isNaN(i) || i < 0 || i >= pendingAttachments.length) return;
+    const item = pendingAttachments[i];
+    if (item?.previewUrl) {
+      try { URL.revokeObjectURL(item.previewUrl); } catch { /* ignore */ }
+    }
+    const ta = $('chat-input');
+    if (ta && item?.ref) {
+      ta.value = ta.value.split(item.ref).join('').replace(/\n{3,}/g, '\n\n');
+      ta.dispatchEvent(new Event('input'));
+    }
+    pendingAttachments.splice(i, 1);
+    renderAttachBar();
+  });
 
   // Permission buttons → approval.respond (typed control plane)
   delegate.on('click', '[data-perm-id]', (e, el) => {

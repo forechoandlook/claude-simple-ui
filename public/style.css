@@ -28,6 +28,7 @@
     line-height: 1.35 !important;
   }
   #btn-opts,
+  #btn-attach,
   #send-btn,
   #stop-btn {
     height: 36px !important;
@@ -884,10 +885,70 @@ html.pwa-standalone .ma-panel {
 /* ── Chat composer ───────────────────────────────────────────────────────── */
 /* Single outer border only — no DaisyUI nested focus ring / inner outline. */
 #composer-row #btn-opts,
+#composer-row #btn-attach,
 #composer-row #send-btn,
 #composer-row #stop-btn {
   height: 40px;
   min-height: 40px;
+}
+#chat-composer.chat-drop-active {
+  outline: 2px dashed color-mix(in oklch, var(--color-primary) 70%, transparent);
+  outline-offset: -2px;
+  background: color-mix(in oklch, var(--color-primary) 8%, var(--color-base-200));
+}
+#chat-attach-bar:not(.hidden) {
+  display: flex;
+}
+.chat-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 14%, transparent);
+  position: relative;
+  flex-shrink: 0;
+  background: var(--color-base-100);
+}
+.chat-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.chat-thumb-path {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 10px;
+  padding: 4px;
+  text-align: center;
+  word-break: break-all;
+  line-height: 1.15;
+  color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
+  background: color-mix(in oklch, var(--color-base-content) 6%, var(--color-base-100));
+}
+.chat-thumb-label {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  font-size: 9px;
+  text-align: center;
+  background: rgba(0,0,0,.55);
+  color: #fff;
+  line-height: 1.2;
+  padding: 1px 0;
+}
+.chat-thumb-x {
+  position: absolute;
+  top: 0;
+  right: 0;
+  background: rgba(0,0,0,.65);
+  color: #fff;
+  border: 0;
+  font-size: 10px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  line-height: 1;
+  z-index: 1;
 }
 #chat-input.chat-input,
 #chat-input {

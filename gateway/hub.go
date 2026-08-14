@@ -75,7 +75,7 @@ func (g *gateway) fanInGET(path string) (results []struct {
 		wg.Add(1)
 		go func(machineID string) {
 			defer wg.Done()
-			res, err := g.forwardHTTP(machineID, http.MethodGet, path, g.edgeHeaders(), "")
+			res, err := g.forwardHTTP(machineID, http.MethodGet, path, g.edgeHeaders(), "", "")
 			entry := struct {
 				MachineID string
 				Status    int
@@ -131,7 +131,7 @@ func (g *gateway) handleAggregateSessions(w http.ResponseWriter, r *http.Request
 		if enc := vals.Encode(); enc != "" {
 			fwd += "?" + enc
 		}
-		res, err := g.forwardHTTP(only, http.MethodGet, fwd, g.edgeHeaders(), "")
+		res, err := g.forwardHTTP(only, http.MethodGet, fwd, g.edgeHeaders(), "", "")
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 			return
@@ -320,7 +320,7 @@ func (g *gateway) handleProxiedAPI(w http.ResponseWriter, r *http.Request) {
 		fwdPath += "?" + enc
 	}
 
-	var bodyStr string
+	var bodyStr, bodyEncoding string
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 		if err != nil {
@@ -331,7 +331,7 @@ func (g *gateway) handleProxiedAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		bodyStr = string(b)
+		bodyStr, bodyEncoding = encodeProxyBody(r.Header.Get("Content-Type"), b)
 	}
 
 	headers := g.edgeHeaders()
@@ -347,7 +347,7 @@ func (g *gateway) handleProxiedAPI(w http.ResponseWriter, r *http.Request) {
 		headers[k] = vals[0]
 	}
 
-	if err := g.forwardHTTPStream(machineID, r.Method, fwdPath, headers, bodyStr, w); err != nil {
+	if err := g.forwardHTTPStream(machineID, r.Method, fwdPath, headers, bodyStr, bodyEncoding, w); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 	}
 }

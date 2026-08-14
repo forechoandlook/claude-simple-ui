@@ -93,10 +93,16 @@ function connect() {
         delete reqHeaders['Accept-Encoding'];
         reqHeaders['Accept-Encoding'] = 'identity';
 
+        // Hub may send binary request bodies as base64 (image/file uploads).
+        // Without decoding, Node fetch would write the base64 text to disk.
+        let reqBody = msg.body || undefined;
+        if (reqBody != null && reqBody !== '' && String(msg.encoding || '').toLowerCase() === 'base64') {
+          reqBody = Buffer.from(reqBody, 'base64');
+        }
         const res = await fetch(url, {
           method: msg.method,
           headers: reqHeaders,
-          body: msg.body || undefined,
+          body: reqBody,
         });
         const headers = sanitizeProxyHeaders(Object.fromEntries(res.headers.entries()));
         const contentType = res.headers.get('content-type') || '';
