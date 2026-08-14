@@ -61,24 +61,15 @@ export const AppShell = (opts = {}) => {
         </div>
       </div>
       <div id="recent-menu-wrap" class="relative flex-shrink-0">
-        <button type="button" id="btn-recent-sessions" class="btn btn-ghost btn-xs border border-base-300 gap-1"
-                title="最近会话 / 快速跳转">
+        <button type="button" id="btn-recent-sessions" class="btn btn-ghost btn-xs border border-base-300 gap-1 min-h-8 px-2"
+                title="最近会话 / 快速跳转" aria-haspopup="listbox" aria-expanded="false">
           <span>最近</span>
           <span class="text-[10px] opacity-50">▾</span>
         </button>
-        <div id="recent-menu" class="hidden absolute left-0 top-full mt-1 z-50 w-80 max-h-[min(24rem,70vh)] overflow-y-auto
-             rounded-lg border border-base-300 bg-base-100 shadow-xl p-2">
-          <div class="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-base-300 sticky top-0 bg-base-100 z-[1]">
-            <span class="text-[10px] uppercase tracking-wide text-base-content/45 font-semibold">Recent sessions</span>
-            <span id="recent-menu-count" class="text-[10px] text-base-content/35 font-mono"></span>
-          </div>
-          <div id="recent-menu-list" class="flex flex-col gap-0.5"></div>
-          <p id="recent-menu-empty" class="text-xs text-base-content/40 px-1 py-2 hidden">暂无最近会话</p>
-        </div>
       </div>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate min-w-0">Select a session</span>
       <span id="conn-dot" class="w-2 h-2 rounded-full bg-base-content/30 flex-shrink-0" title="连接状态"></span>
-      <div class="flex gap-2">
+      <div class="flex gap-2 topbar-actions">
         <button id="btn-refresh-conn" class="btn btn-ghost btn-xs border border-base-300" title="重新连接并同步">↻</button>
         <button id="btn-pwa-install" class="btn btn-ghost btn-xs border border-base-300 hidden" title="安装到主屏幕">安装</button>
         <button id="btn-meta-agent"  class="btn btn-ghost btn-xs border border-primary/40 text-primary" title="Meta Agent — 报告 / 问答 / VLM">✦ Agent</button>
@@ -87,6 +78,18 @@ export const AppShell = (opts = {}) => {
         <button id="btn-settings"    class="btn btn-ghost btn-xs border border-base-300">⚙️</button>
         <button id="btn-logout"      class="btn btn-ghost btn-xs border border-base-300">Sign out</button>
       </div>
+    </div>
+    <!-- Fixed panel + backdrop: siblings of topbar so flex layout never clips them -->
+    <div id="recent-menu-backdrop" class="hidden fixed inset-0 z-[55] bg-black/40" aria-hidden="true"></div>
+    <div id="recent-menu" class="hidden fixed z-[60] w-80 max-h-[min(24rem,70vh)] overflow-y-auto
+         rounded-lg border border-base-300 bg-base-100 shadow-xl p-2"
+         role="listbox" aria-label="最近会话">
+      <div class="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-base-300 sticky top-0 bg-base-100 z-[1]">
+        <span class="text-[10px] uppercase tracking-wide text-base-content/45 font-semibold">最近会话</span>
+        <span id="recent-menu-count" class="text-[10px] text-base-content/35 font-mono"></span>
+      </div>
+      <div id="recent-menu-list" class="flex flex-col gap-0.5"></div>
+      <p id="recent-menu-empty" class="text-xs text-base-content/40 px-1 py-2 hidden">暂无最近会话</p>
     </div>
     <!-- Hub: only when no remembered machine (or last one offline) -->
     <div id="machine-picker" class="hidden fixed inset-0 z-[60] bg-base-100 flex items-center justify-center p-4">

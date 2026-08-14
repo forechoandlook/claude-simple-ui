@@ -931,17 +931,43 @@ html.pwa-standalone .ma-panel {
   transition: background-color 99999s ease-in-out 0s;
 }
 
-/* Recent sessions topbar menu */
+/* Recent sessions panel (position set in JS under topbar; never use top:100% with fixed) */
 #recent-menu {
   min-width: 16rem;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+#recent-menu.recent-menu-open {
+  display: block; /* beat .hidden if both race */
 }
 @media (max-width: 640px) {
-  #recent-menu-wrap #recent-menu {
-    position: fixed;
-    left: 0.5rem;
-    right: 0.5rem;
+  #recent-menu {
+    min-width: 0;
     width: auto;
-    max-width: none;
+  }
+  /* Keep 最近 + hamburger reachable; tuck secondary actions */
+  #topbar {
+    overflow: visible;
+    gap: 0.35rem;
+  }
+  #topbar .topbar-actions {
+    gap: 0.25rem;
+    flex-shrink: 0;
+  }
+  #btn-theme,
+  #btn-settings,
+  #btn-logout,
+  #btn-pwa-install {
+    display: none !important;
+  }
+  #topbar-project {
+    font-size: 11px;
+    max-width: 30vw;
+  }
+  #recent-menu-list .recent-menu-item {
+    min-height: 44px; /* comfortable touch targets */
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
   }
 }
 #chat-input:focus,

@@ -26,7 +26,7 @@ import { openMetaAgent, toggleMetaAgent } from './agent-panel.js';
 import { AuthScreen, AppShell } from './shell/templates.js';
 import {
   updateDashboard, shiftCalMonth, setSelectedCalDate, getDashboardSessions,
-  renderRecentSessionsMenu, closeRecentMenu,
+  openRecentMenu, toggleRecentMenu, closeRecentMenu, positionRecentMenu,
 } from './shell/dashboard.js';
 import {
   loadAllSessions, loadWorkspaces, renderSessionList, syncSidebarChrome,
@@ -570,26 +570,43 @@ export function initShell(opts = {}) {
     }
   });
   delegate.on('click', '#btn-recent-sessions', e => {
+    e.preventDefault();
     e.stopPropagation();
     closeMachineMenu();
-    const menu = $('recent-menu');
-    if (!menu) return;
-    if (menu.classList.contains('hidden')) {
-      renderRecentSessionsMenu(getDashboardSessions());
-      menu.classList.remove('hidden');
-    } else {
-      menu.classList.add('hidden');
-    }
+    toggleRecentMenu(getDashboardSessions());
+    const open = !$('recent-menu')?.classList.contains('hidden');
+    const btn = $('btn-recent-sessions');
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  delegate.on('click', '#recent-menu-backdrop', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeRecentMenu();
+    $('btn-recent-sessions')?.setAttribute('aria-expanded', 'false');
   });
   document.addEventListener('click', e => {
     const machineWrap = $('machine-menu-wrap');
     if (machineWrap && !machineWrap.contains(e.target)) closeMachineMenu();
-    const recentWrap = $('recent-menu-wrap');
-    if (recentWrap && !recentWrap.contains(e.target)) closeRecentMenu();
+    const menu = $('recent-menu');
+    const btn = $('btn-recent-sessions');
+    const t = e.target;
+    // Menu is portaled (fixed) outside the button wrap — check both
+    if (menu && !menu.classList.contains('hidden')) {
+      if (menu.contains(t) || btn?.contains(t)) return;
+      closeRecentMenu();
+      btn?.setAttribute('aria-expanded', 'false');
+    }
+  });
+  // Keep panel glued under topbar on rotate / URL bar show-hide
+  window.addEventListener('resize', () => {
+    if ($('recent-menu') && !$('recent-menu').classList.contains('hidden')) {
+      positionRecentMenu();
+    }
   });
   // After picking a session from the topbar menu, close it (row click also resumes).
   delegate.on('click', '#recent-menu [data-session-id]', () => {
     closeRecentMenu();
+    $('btn-recent-sessions')?.setAttribute('aria-expanded', 'false');
   });
 
   delegate.on('click', '#btn-edit-project-notes, #project-goal-text, #project-notes-text', () => {

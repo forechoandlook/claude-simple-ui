@@ -266,7 +266,70 @@ export function updateRecentSessionsList(sessions) {
 }
 
 export function closeRecentMenu() {
-  $('recent-menu')?.classList.add('hidden');
+  const menu = $('recent-menu');
+  if (menu) {
+    menu.classList.add('hidden');
+    menu.classList.remove('recent-menu-open');
+    // clear inline placement for next open
+    menu.style.top = '';
+    menu.style.left = '';
+    menu.style.right = '';
+    menu.style.width = '';
+    menu.style.maxHeight = '';
+  }
+  $('recent-menu-backdrop')?.classList.add('hidden');
+}
+
+/**
+ * Place the panel under the topbar with position:fixed so it is never clipped
+ * by #app / #topbar overflow (the previous top-full + fixed combo put it
+ * below the viewport on phones — looked like “no response”).
+ */
+export function positionRecentMenu() {
+  const menu = $('recent-menu');
+  const topbar = $('topbar');
+  if (!menu || !topbar) return;
+  const rect = topbar.getBoundingClientRect();
+  const gap = 6;
+  const top = Math.round(rect.bottom + gap);
+  const side = window.matchMedia('(max-width: 640px)').matches ? 8 : null;
+  menu.style.top = `${top}px`;
+  if (side != null) {
+    menu.style.left = `${side}px`;
+    menu.style.right = `${side}px`;
+  } else {
+    // desktop: align under the “最近” button when possible
+    const btn = $('btn-recent-sessions');
+    const br = btn?.getBoundingClientRect();
+    if (br) {
+      const width = Math.min(320, window.innerWidth - 16);
+      let left = br.left;
+      if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+      if (left < 8) left = 8;
+      menu.style.left = `${Math.round(left)}px`;
+      menu.style.right = 'auto';
+      menu.style.width = `${width}px`;
+    }
+  }
+  const maxH = Math.max(160, window.innerHeight - top - 12);
+  menu.style.maxHeight = `${Math.min(maxH, Math.round(window.innerHeight * 0.7))}px`;
+}
+
+export function openRecentMenu(sessions) {
+  const menu = $('recent-menu');
+  if (!menu) return;
+  renderRecentSessionsMenu(sessions ?? getDashboardSessions());
+  menu.classList.remove('hidden');
+  menu.classList.add('recent-menu-open');
+  positionRecentMenu();
+  $('recent-menu-backdrop')?.classList.remove('hidden');
+}
+
+export function toggleRecentMenu(sessions) {
+  const menu = $('recent-menu');
+  if (!menu) return;
+  if (menu.classList.contains('hidden')) openRecentMenu(sessions);
+  else closeRecentMenu();
 }
 
 /** Topbar quick-jump: last N sessions by updatedAt. */
