@@ -8,6 +8,7 @@ import { api, probeHub } from '../api.js';
 import { loadAllSessions, loadWorkspaces, loadAgentsMeta } from './session-list.js';
 import { loadSessionMetaMap } from './notes.js';
 import { loadMetaAgentBoot } from '../agent-panel.js';
+import { syncFocusScope } from '../mobile.js';
 // goHome imported dynamically in enterMachine to avoid circular deps
 
 export async function refreshMachinesList() {
@@ -54,6 +55,9 @@ export function showMachinePicker() {
   const el = $('machine-picker');
   if (!el) return;
   el.classList.remove('hidden');
+  // On phones hidden panels are inert so Safari's form assistant cannot tab
+  // into them. Re-enable this picker before its machine buttons are shown.
+  syncFocusScope();
   hubMachineReady.value = false;
   renderMachinePickerList();
   const status = $('machine-picker-status');
@@ -65,6 +69,7 @@ export function showMachinePicker() {
 
 export function hideMachinePicker() {
   $('machine-picker')?.classList.add('hidden');
+  syncFocusScope();
   hubMachineReady.value = true;
 }
 
@@ -191,4 +196,3 @@ export async function enterMachine(machineId, { forceReload = false } = {}) {
   await Promise.all([loadAllSessions(), loadWorkspaces(), loadSessionMetaMap(), loadAgentsMeta().catch(() => {})]);
   hubMachineReady.value = true;
 }
-
