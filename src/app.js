@@ -448,13 +448,27 @@ export function createApp() {
       const ext  = (req.headers['x-filename'] || 'image.png').split('.').pop().replace(/[^a-z0-9]/gi, '') || 'png';
       const name = `claude-upload-${Date.now()}.${ext}`;
       const dest = path.join(os.tmpdir(), name);
-      const writer = fsSync.createWriteStream(dest);
-      req.pipe(writer);
-      await new Promise((resolve, reject) => {
-        writer.on('finish', resolve);
-        writer.on('error', reject);
-        req.on('error', reject);
-      });
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      let body = Buffer.concat(chunks);
+      // Tolerate mobile share sheets that label Base64 text as a PNG. Only
+      // decode when the result has a real image signature.
+      const text = body.toString('utf8').trim();
+      const m = /^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\s]+)$/i.exec(text);
+      const encoded = (m?.[1] || text).replace(/\s/g, '');
+      if (/^[a-z0-9+/=]+$/i.test(encoded) && encoded.length % 4 !== 1) {
+        try {
+          const decoded = Buffer.from(encoded, 'base64');
+          const image = decoded.length >= 3 && (
+            (decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e)
+            || (decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff)
+            || decoded.subarray(0, 6).toString() === 'GIF87a'
+            || decoded.subarray(8, 12).toString() === 'WEBP'
+          );
+          if (image) body = decoded;
+        } catch { /* preserve the original upload */ }
+      }
+      await fs.writeFile(dest, body);
       res.json({ path: dest });
     })().catch(e => res.status(500).json({ error: e.message }));
   });

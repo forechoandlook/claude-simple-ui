@@ -983,16 +983,17 @@ html.pwa-standalone .ma-panel {
   display: flex;
 }
 .chat-thumb {
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
   overflow: hidden;
-  border: 1px solid color-mix(in oklch, var(--color-base-content) 14%, transparent);
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
   position: relative;
   flex-shrink: 0;
-  background: var(--color-base-100);
+  background: color-mix(in oklch, var(--color-base-content) 4%, var(--color-base-100));
+  box-shadow: 0 1px 2px color-mix(in oklch, black 12%, transparent);
 }
-.chat-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.chat-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .chat-thumb-path {
   display: flex;
   align-items: center;
@@ -1008,30 +1009,23 @@ html.pwa-standalone .ma-panel {
   background: color-mix(in oklch, var(--color-base-content) 6%, var(--color-base-100));
 }
 .chat-thumb-label {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  right: 0;
-  font-size: 9px;
-  text-align: center;
-  background: rgba(0,0,0,.55);
-  color: #fff;
-  line-height: 1.2;
-  padding: 1px 0;
+  display: none;
 }
 .chat-thumb-x {
   position: absolute;
-  top: 0;
-  right: 0;
-  background: rgba(0,0,0,.65);
-  color: #fff;
-  border: 0;
-  font-size: 10px;
-  width: 16px;
-  height: 16px;
+  top: 4px;
+  right: 4px;
+  background: rgba(255,255,255,.92);
+  color: #334155;
+  border: 1px solid rgba(15,23,42,.1);
+  border-radius: 999px;
+  font-size: 11px;
+  width: 20px;
+  height: 20px;
   cursor: pointer;
   line-height: 1;
   z-index: 1;
+  box-shadow: 0 1px 3px rgba(15,23,42,.18);
 }
 #chat-input.chat-input,
 #chat-input {

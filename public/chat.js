@@ -725,7 +725,7 @@ export function sendMessage() {
   isProcessing.value = true;
   syncWakeLock();
   const now = Date.now();
-  if (text.startsWith('!')) {
+  if (isShellInput(text)) {
     appendMsg('shell', '$ Shell', text.slice(1).trim(), { ts: now });
     // Typed control plane (legacy shell-command still accepted server-side)
     const ok = sendWs({
@@ -778,7 +778,7 @@ export function newSession() {
 
 // ── Input helpers ─────────────────────────────────────────────────────────────
 function updateInputMode(value) {
-  const isShell = value.startsWith('!');
+  const isShell = isShellInput(value);
   const input = $('chat-input'), btn = $('send-btn');
   if (!input || !btn) return;
   input.classList.toggle('textarea-warning', isShell);
@@ -793,6 +793,12 @@ function updateInputMode(value) {
   } else {
     input.placeholder = compact ? `问 ${label}…` : `Ask ${label}… or !cmd for shell`;
   }
+}
+
+/** `![img](path)` is an attachment reference, not a shell command. */
+function isShellInput(value) {
+  const text = String(value || '').trimStart();
+  return text.startsWith('!') && !/^!\[[^\]]*\]\([^)]+\)/.test(text);
 }
 
 function chatInputMaxHeight() {
@@ -913,16 +919,17 @@ let chatDropBound = false;
 
 async function uploadChatBlob(blob, filename) {
   const name = filename || `upload-${Date.now()}`;
+  const uploadBlob = await normalizeImageBlob(blob, name);
   const headers = authHeaders({ 'x-filename': name });
   delete headers['Content-Type'];
   // Prefer file MIME so hub base64-encodes binary uploads correctly.
-  if (blob?.type && !headers['Content-Type'] && !headers['content-type']) {
-    headers['Content-Type'] = blob.type;
+  if (uploadBlob?.type && !headers['Content-Type'] && !headers['content-type']) {
+    headers['Content-Type'] = uploadBlob.type;
   }
   const res = await fetch('/api/upload-image', {
     method: 'POST',
     headers,
-    body: blob,
+    body: uploadBlob,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -931,6 +938,46 @@ async function uploadChatBlob(blob, filename) {
   const data = await res.json();
   if (!data?.path) throw new Error('upload returned no path');
   return data.path;
+}
+
+function imageMimeFromBytes(bytes, fallback) {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && String.fromCharCode(...bytes.slice(0, 6)) === 'GIF87a') return 'image/gif';
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP') return 'image/webp';
+  return fallback || 'image/png';
+}
+
+/** Some iOS share sheets provide a .png whose bytes are Base64 text. Decode it once
+ * before both upload and preview, while leaving ordinary image files untouched. */
+async function normalizeImageBlob(blob, filename) {
+  if (!blob || !isImageFile({ type: blob.type, name: filename })) return blob;
+  let head;
+  try { head = (await blob.slice(0, 80).text()).trim(); } catch { return blob; }
+  // Avoid reading an entire multi-megabyte ordinary photo into a JS string.
+  if (!/^(?:data:image\/[a-z0-9.+-]+;base64,|iVBORw0KGgo|\/9j\/|R0lGOD|UklGR)/i.test(head)) return blob;
+  let text;
+  try { text = (await blob.text()).trim(); } catch { return blob; }
+  const dataUrl = /^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\s]+)$/i.exec(text);
+  const payload = dataUrl?.[1] || text;
+  if (!payload || !/^[a-z0-9+/=\s]+$/i.test(payload) || payload.length % 4 === 1) return blob;
+  try {
+    const binary = atob(payload.replace(/\s/g, ''));
+    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const mime = imageMimeFromBytes(bytes, blob.type);
+    // A valid Base64 string alone is not enough: only replace it when it decodes
+    // to an actual image signature.
+    if (mime === (blob.type || 'image/png') && !/^(image\/png|image\/jpeg|image\/gif|image\/webp)$/.test(mime)) return blob;
+    const isImage = bytes.length >= 3 && (
+      (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e)
+      || (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+      || String.fromCharCode(...bytes.slice(0, 6)) === 'GIF87a'
+      || String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP'
+    );
+    return isImage ? new Blob([bytes], { type: mime }) : blob;
+  } catch {
+    return blob;
+  }
 }
 
 function insertAtCursor(ta, text) {
@@ -994,11 +1041,12 @@ function renderAttachBar() {
 async function addChatAttachment(file) {
   if (!file) return;
   const name = file.name || `upload-${Date.now()}`;
-  const path = await uploadChatBlob(file, name);
+  const normalized = await normalizeImageBlob(file, name);
+  const path = await uploadChatBlob(normalized, name);
   const { ref, label, kind } = makeAttachRef(file, path);
   let previewUrl = '';
   if (kind === 'image') {
-    try { previewUrl = URL.createObjectURL(file); } catch { /* ignore */ }
+    try { previewUrl = URL.createObjectURL(normalized); } catch { /* ignore */ }
   }
   pendingAttachments.push({ path, ref, label, kind, name, previewUrl });
   renderAttachBar();
