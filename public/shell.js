@@ -14,6 +14,7 @@ import {
 } from './state.js';
 import { api } from './api.js';
 import { promptPwaInstall } from './pwa.js';
+import { syncFocusScope } from './mobile.js';
 import { getLastSessionContext } from './shell/session-context.js';
 import {
   connectWS, clearMessages, appendMsg, appendSystemMsg, sendMessage, stopProcessing,
@@ -66,7 +67,8 @@ function showPwaInstallHelp() {
       <li>下滑找到并点 <strong>添加到主屏幕</strong></li>
       <li>确认名称后点 <strong>添加</strong></li>
     </ol>
-    <p class="text-xs text-base-content/50 mt-3">需用 <strong>Safari</strong> 打开本站；微信/Chrome 内置浏览器通常没有「添加到主屏幕」。</p>`;
+    <p class="text-xs text-base-content/50 mt-3">需用 <strong>Safari</strong> 打开本站；微信/Chrome 内置浏览器通常没有「添加到主屏幕」。</p>
+    <p class="text-xs text-warning/80 mt-2">当前若是 IP + 自签 HTTPS，Safari 仍会显示「不安全」。加到主屏幕可去掉浏览器外壳，但不能去掉系统输入条。彻底干净需要正式域名证书。</p>`;
   } else if (isAndroid) {
     body = `<ol class="list-decimal pl-4 space-y-2 text-sm text-base-content/80">
       <li>点右上角菜单 <strong>⋮</strong></li>
@@ -107,8 +109,30 @@ export async function initAuth() {
     app.classList.add('hidden');
     app.style.display = 'none';
   }
-  const status = await api('GET', '/api/auth/status');
   const btn = $('auth-btn');
+  let status;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    // This is the first request made by a cold PWA launch. Bound it so a
+    // captive portal, stale reverse proxy, or sleeping hub cannot strand the
+    // app behind its boot screen indefinitely.
+    status = await api('GET', '/api/auth/status', undefined, controller.signal);
+  } catch (e) {
+    console.warn('[auth status]', e);
+    const error = $('auth-error');
+    if (error) {
+      error.textContent = '无法连接服务器。请检查网络或服务地址后重试。';
+      error.classList.remove('hidden');
+    }
+    // The normal sign-in form remains usable: a transient status failure
+    // should be visible, not turn the installed app into a black screen.
+    if (btn) btn.dataset.mode = 'login';
+    return;
+  } finally {
+    clearTimeout(timer);
+  }
+
   if (status.needsSetup) {
     $('auth-subtitle').textContent = 'Create your account to get started';
     btn.textContent = 'Create Account';
@@ -276,6 +300,7 @@ export function initShell(opts = {}) {
         document.dispatchEvent(new CustomEvent('shell-tab-shown'));
       });
     }
+    syncFocusScope();
   });
 
   initSidebarResize();
@@ -307,6 +332,7 @@ export function initShell(opts = {}) {
 
   delegate.on('click', '#btn-home', goHome);
   delegate.on('click', '#auth-btn', submitAuth);
+  delegate.on('submit', '#auth-form', e => { e.preventDefault(); submitAuth(); });
   delegate.on('keydown', '#auth-username, #auth-password', e => { if (e.key === 'Enter') submitAuth(); });
   delegate.on('click', '#hamburger', () => $('sidebar').classList.contains('open') ? closeSidebar() : openSidebar());
   delegate.on('click', '#sidebar-overlay', closeSidebar);
@@ -460,7 +486,10 @@ export function initShell(opts = {}) {
   delegate.on('click', '#git-root-btn', () => applyRoot('git-root-input', gitRoot));
   delegate.on('keydown', '#files-root-input', e => { if (e.key === 'Enter') applyRoot('files-root-input', filesRoot); });
   delegate.on('keydown', '#git-root-input', e => { if (e.key === 'Enter') applyRoot('git-root-input', gitRoot); });
-  delegate.on('click', '#btn-opts', () => { $('chat-opts').classList.toggle('hidden'); });
+  delegate.on('click', '#btn-opts', () => {
+    $('chat-opts').classList.toggle('hidden');
+    syncFocusScope();
+  });
 
   delegate.on('change', '#sel-agent', (_, el) => {
     const prev = currentAgent.peek();
@@ -718,4 +747,3 @@ export function initShell(opts = {}) {
     btn.classList.toggle('text-base-content/50', !on);
   });
 }
-

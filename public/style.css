@@ -14,28 +14,31 @@
 
   /* Compact chat composer on phones — less height, less dead space under bar */
   #composer-row {
-    gap: 0.4rem;
-    padding: 0.4rem 0.55rem 0.35rem !important;
+    gap: 0.35rem;
+    padding: 0.45rem 0.6rem 0.4rem !important;
   }
   #chat-input.chat-input,
   #chat-input {
-    min-height: 36px !important;
+    min-height: 40px !important;
     max-height: 96px !important;
-    padding: 0.4rem 0.65rem !important;
-    border-radius: 0.65rem;
+    padding: 0.5rem 0.75rem !important;
+    border-radius: 1.15rem;
     /* 16px prevents iOS Safari auto-zoom on focus */
     font-size: 16px !important;
-    line-height: 1.35 !important;
+    line-height: 1.4 !important;
   }
   #btn-opts,
   #btn-attach,
   #send-btn,
   #stop-btn {
-    height: 36px !important;
-    min-height: 36px !important;
-    padding-left: 0.65rem;
-    padding-right: 0.65rem;
+    height: 40px !important;
+    min-height: 40px !important;
+    min-width: 40px;
+    padding-left: 0.7rem;
+    padding-right: 0.7rem;
+    border-radius: 999px;
   }
+  #send-btn { font-weight: 650; }
   #chat-opts {
     padding-top: 0.35rem !important;
     padding-left: 0.55rem !important;
@@ -48,6 +51,64 @@
   /* File list actions always visible on touch (no hover) */
   .file-row-action {
     opacity: 1 !important;
+  }
+
+  /* Tighter chrome so the thread is the product */
+  #topbar-project { display: none; }
+  #project-view > .flex.bg-base-200 { /* tab strip */
+    min-height: 40px;
+  }
+  #project-view [data-tab] {
+    padding: 0.55rem 0.85rem !important;
+    font-size: 13px !important;
+  }
+  #project-notes-bar,
+  #session-notes-bar {
+    font-size: 11px;
+    padding: 0.35rem 0.7rem !important;
+  }
+  #messages {
+    padding: 0.65rem 0.45rem !important;
+    gap: 0.55rem !important;
+  }
+  .msg-row { gap: 3px; }
+  .msg-row.assistant > div:not(.msg-ts),
+  .msg-row.error > div:not(.msg-ts) {
+    max-width: 100% !important;
+    border-radius: 1rem !important;
+    border-top-left-radius: 0.3rem !important;
+  }
+  .msg-row.user > div:not(.msg-ts) {
+    max-width: 88% !important;
+    border-radius: 1rem !important;
+    border-top-right-radius: 0.3rem !important;
+  }
+  #sidebar-resize,
+  #sidebar-toggle {
+    display: none !important;
+  }
+  .md {
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+  .md h1, .md h2, .md h3 {
+    font-size: 1.02em !important;
+    padding: 0.05em 0 0.15em 0.45em !important;
+    border-left-width: 3px !important;
+    background: none !important;
+    border-bottom: none !important;
+    margin: 0.7em 0 0.35em !important;
+  }
+  .md :not(pre) > code {
+    white-space: nowrap;
+    display: inline;
+    font-size: 0.82em;
+    padding: 0.08em 0.32em;
+  }
+  .token-bar {
+    font-size: 10px;
+    line-height: 1.45;
+    padding: 0.15rem 0.45rem;
   }
 }
 
@@ -73,6 +134,20 @@ html, body {
   max-height: 100dvh;
   overflow: hidden;
 }
+/* iOS keyboard: shrink the app to the visual viewport so the composer
+ * sits above the keyboard instead of floating over Safari chrome. */
+html.vv-keyboard,
+html.vv-keyboard body {
+  height: var(--vvh, 100dvh);
+  max-height: var(--vvh, 100dvh);
+}
+html.vv-keyboard body {
+  position: fixed;
+  top: var(--vv-top, 0px);
+  left: 0;
+  right: 0;
+  width: 100%;
+}
 html.pwa-standalone,
 html.pwa-standalone body {
   background: oklch(var(--b1));
@@ -90,10 +165,18 @@ html.pwa-standalone #topbar {
  * Inner #composer-row already has small padding; only add safe-area beyond that
  * so we don't stack large empty strips under the input.
  */
+#chat-form {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
 #chat-composer {
   padding-bottom: env(safe-area-inset-bottom, 0px);
   padding-left: env(safe-area-inset-left, 0px);
   padding-right: env(safe-area-inset-right, 0px);
+}
+html.vv-keyboard #chat-composer {
+  padding-bottom: 0;
 }
 /* Welcome / machine picker full-screen panels */
 html.pwa-standalone #welcome,
@@ -1136,6 +1219,26 @@ html.pwa-standalone .ma-panel {
 }
 .msg-row.user .msg-ts { text-align: right; }
 
+.token-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.1rem 0.45rem;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklch, var(--color-base-content) 38%, transparent);
+  line-height: 1.45;
+}
+.token-bar-mark {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+.token-bar-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* ── Long message collapse ───────────────────────────────────────────────── */
 .msg-card .msg-body { max-height: 8em; overflow: hidden; mask-image: linear-gradient(to bottom, black 60%, transparent 100%); }
 .msg-card.open .msg-body { max-height: none; mask-image: none; }
@@ -1364,3 +1467,12 @@ html.pwa-standalone .ma-panel {
 }
 .ma-report-md { font-size: 13px; }
 .ma-report-item { display: block; }
+
+@media (max-width: 640px) {
+  .md h1, .md h2, .md h3 {
+    background: none !important;
+    border-bottom: none !important;
+    font-size: 1.02em !important;
+    padding: 0.05em 0 0.15em 0.5em !important;
+  }
+}

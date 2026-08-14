@@ -14,12 +14,14 @@ import {
   refreshMachinesList, hideMachinePicker, showMachinePicker,
   syncTopbarMachine, startMachinePolling,
 } from './hub.js';
+import { syncFocusScope } from '../mobile.js';
 
 export async function showApp(opts = {}) {
   $('auth-screen').style.display = 'none';
   const app = $('app');
   app.classList.remove('hidden');
   app.style.display = 'flex';
+  queueMicrotask(syncFocusScope);
 
   // Use probe result from boot when provided (avoid second /api/hub round-trip)
   let hub = opts.hub;

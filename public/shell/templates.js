@@ -7,6 +7,7 @@ export const AuthScreen = () => `
       <div class="card-body gap-3 p-8">
         <h1 class="text-xl font-bold">🤖 Agent UI</h1>
         <p id="auth-subtitle" class="text-sm text-base-content/60 mb-1">Claude · Codex · Grok</p>
+        <form id="auth-form" class="flex flex-col gap-3" autocomplete="on" action="#">
         <label class="form-control">
           <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Username</span></div>
           <input id="auth-username" type="text" class="input input-bordered input-sm" placeholder="username" autocomplete="username">
@@ -15,7 +16,8 @@ export const AuthScreen = () => `
           <div class="label py-1"><span class="label-text text-xs uppercase tracking-wide">Password</span></div>
           <input id="auth-password" type="password" class="input input-bordered input-sm" placeholder="••••••" autocomplete="current-password">
         </label>
-        <button id="auth-btn" class="btn btn-primary btn-sm mt-1" data-mode="login">Sign In</button>
+        <button type="submit" id="auth-btn" class="btn btn-primary btn-sm mt-1" data-mode="login">Sign In</button>
+        </form>
         <div id="auth-error" class="alert alert-error text-xs py-2 hidden"></div>
       </div>
     </div>
@@ -72,8 +74,8 @@ export const AppShell = (opts = {}) => {
       <div class="flex gap-2 topbar-actions">
         <button id="btn-refresh-conn" class="btn btn-ghost btn-xs border border-base-300" title="重新连接并同步">↻</button>
         <button id="btn-pwa-install" class="btn btn-ghost btn-xs border border-base-300 hidden" title="安装到主屏幕">安装</button>
-        <button id="btn-meta-agent"  class="btn btn-ghost btn-xs border border-primary/40 text-primary" title="Meta Agent — 报告 / 问答 / VLM">✦ Agent</button>
-        <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300">＋ New</button>
+        <button id="btn-meta-agent"  class="btn btn-ghost btn-xs border border-primary/40 text-primary" title="Meta Agent — 报告 / 问答 / VLM"><span class="hidden sm:inline">✦ Agent</span><span class="sm:hidden">✦</span></button>
+        <button id="btn-new-session" class="btn btn-ghost btn-xs border border-base-300" title="New session"><span class="hidden sm:inline">＋ New</span><span class="sm:hidden">＋</span></button>
         <button id="btn-theme"        class="btn btn-ghost btn-xs border border-base-300">🌙</button>
         <button id="btn-settings"    class="btn btn-ghost btn-xs border border-base-300">⚙️</button>
         <button id="btn-logout"      class="btn btn-ghost btn-xs border border-base-300">Sign out</button>
@@ -238,9 +240,10 @@ export const AppShell = (opts = {}) => {
               <button id="scroll-bottom-btn" class="scroll-fab hidden" title="Jump to bottom">↓</button>
             </div>
             <div id="permission-requests"></div>
+            <form id="chat-form" autocomplete="off" action="#" class="flex flex-col flex-shrink-0">
             <div id="chat-composer" class="flex flex-col border-t border-base-300 bg-base-200 flex-shrink-0">
               <div id="chat-attach-bar" class="hidden flex flex-wrap gap-1.5 px-3 pt-2"></div>
-              <div id="chat-opts" class="hidden flex items-center gap-1.5 px-3 pt-2 flex-wrap">
+              <div id="chat-opts" class="hidden flex items-center gap-1.5 px-3 pt-2 flex-wrap" inert>
                 <select id="sel-agent" class="select select-xs select-bordered text-xs font-semibold" title="Agent">
                   <option value="claude">Claude</option>
                   <option value="codex">Codex</option>
@@ -286,22 +289,25 @@ export const AppShell = (opts = {}) => {
               <div id="composer-row" class="flex gap-2 items-end px-3 pt-2 pb-2">
                 <button type="button" id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options">⚙</button>
                 <button type="button" id="btn-attach" class="btn btn-ghost btn-sm px-2 text-base-content/40 hover:text-base-content flex-shrink-0" title="添加图片 / 文件">📎</button>
-                <input type="file" id="chat-file-input" class="hidden" multiple accept="image/*,*/*">
-                <textarea id="chat-input" rows="1" placeholder="Ask… (📎 图片/文件 · !cmd · ⌘↵)"
+                <input type="file" id="chat-file-input" class="hidden" multiple accept="image/*,*/*" tabindex="-1">
+                <textarea id="chat-input" rows="1" placeholder="问点什么…"
                   class="chat-input flex-1 text-sm resize-none leading-relaxed"
-                  name="agent-chat-message"
+                  name="q"
+                  enterkeyhint="send"
+                  inputmode="text"
                   autocomplete="off"
                   autocorrect="off"
-                  autocapitalize="off"
+                  autocapitalize="sentences"
                   spellcheck="false"
                   data-1p-ignore="true"
                   data-lpignore="true"
                   data-form-type="other"
                   data-bwignore="true"></textarea>
-                <button type="button" id="send-btn" class="btn btn-primary btn-sm flex-shrink-0">Send</button>
+                <button type="submit" id="send-btn" class="btn btn-primary btn-sm flex-shrink-0">Send</button>
                 <button type="button" id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0">■</button>
               </div>
             </div>
+            </form>
           </div>
           <div id="tab-files" class="hidden flex-col flex-1 overflow-hidden">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">

@@ -11,6 +11,7 @@ import { initImagePaste } from './chat.js';
 import { initMetaAgent } from './agent-panel.js';
 import { initRouter, applyInitialRoute, parseHashPath } from './router.js';
 import { initPwa } from './pwa.js';
+import { initMobileChrome } from './mobile.js';
 
 function markBootReady() {
   const root = document.documentElement;
@@ -28,6 +29,7 @@ const restoreSession = shouldRestoreSessionOnBoot() || !!(ctx.token && deepLink?
 
 // 1. Build DOM (welcome already suppressed via html.boot-restore CSS when restoring)
 initShell({ restoreSession });
+initMobileChrome();
 
 // 2. Feature panels
 initChat();
@@ -85,8 +87,16 @@ initRouter(resumeSession, switchTab);
     }
   } else {
     clearBootRestore();
-    await initAuth();
-    markBootReady();
+    try {
+      await initAuth();
+    } catch (e) {
+      // A failed status probe must never leave the installed app with its
+      // whole UI hidden behind boot-pending. initAuth normally handles
+      // connection failures itself; this is the last-resort guard.
+      console.error('[boot auth]', e);
+    } finally {
+      markBootReady();
+    }
   }
 })();
 

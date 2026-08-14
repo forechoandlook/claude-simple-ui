@@ -11,6 +11,11 @@
 - nginx：`/etc/nginx/conf.d/claude-simple-hub.conf`，`7030` 端口用自签证书反代到 `18080`
   - 证书：`/etc/nginx/ssl/claude-simple-hub/{cert,key}.pem`（`openssl req -x509 ... -days 3650`，无域名，浏览器会提示不受信任）
 - 访问：`https://139.224.131.201:7030`，登录用户名/密码见密码管理器
+- 自签证书后果（不是前端 bug，也不需要做成原生 App）：
+  - Safari/Chrome 底栏会显示「不安全 / Not Secure」+ IP
+  - Service Worker 注册会失败（`An SSL certificate error occurred when fetching the script`）。前端已跳过 IP 主机上的 SW 注册，聊天功能不受影响
+  - iOS 键盘上方的「↑↓ ✓」是系统输入条，网页和「加到主屏幕」都去不掉
+  - 要消掉「不安全」横幅：给机器绑一个域名，用 Let's Encrypt 换正式证书。Safari 分享 → 加到主屏幕 可以去掉浏览器外壳，体验接近 App
 
 ## Edge（gpu2）
 

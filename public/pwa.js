@@ -11,6 +11,24 @@ function isStandalone() {
   );
 }
 
+function isIpHost(host) {
+  const h = String(host || '').replace(/^\[|\]$/g, '');
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return true;
+  // Bare IPv6 (no zone id)
+  if (h.includes(':') && /^[0-9a-f:]+$/i.test(h)) return true;
+  return false;
+}
+
+/** SW requires a trusted TLS cert. IP + self-signed HTTPS always fails fetch(sw.js). */
+function canRegisterSw() {
+  if (!('serviceWorker' in navigator)) return false;
+  if (!window.isSecureContext) return false;
+  const host = location.hostname;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (isIpHost(host)) return false;
+  return location.protocol === 'https:';
+}
+
 function showInstallButton() {
   document.getElementById('btn-pwa-install')?.classList.remove('hidden');
 }
@@ -40,7 +58,14 @@ export function initPwa() {
     requestAnimationFrame(() => showInstallButton());
   }
 
-  if (!('serviceWorker' in navigator)) return;
+  if (!canRegisterSw()) {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations()
+        .then((regs) => regs.forEach((r) => r.unregister()))
+        .catch(() => {});
+    }
+    return;
+  }
 
   // Register after first paint so install doesn't compete with boot.
   const register = () => {
@@ -56,7 +81,12 @@ export function initPwa() {
           });
         });
       })
-      .catch((err) => console.warn('[pwa] SW register failed', err));
+      .catch(() => {
+        // Typical on self-signed / corporate MITM certs. App works without SW.
+        navigator.serviceWorker.getRegistrations()
+          .then((regs) => regs.forEach((r) => r.unregister()))
+          .catch(() => {});
+      });
   };
 
   if (document.readyState === 'complete') setTimeout(register, 0);

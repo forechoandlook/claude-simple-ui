@@ -12,10 +12,19 @@ import { connectWS, clearMessages, appendSystemMsg, applyChatDensity } from '../
 import { refreshModelSelect } from './session-list.js';
 import { switchTab } from './session-nav.js';
 import { showMachinePicker } from './hub.js';
+import { syncFocusScope } from '../mobile.js';
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
-export function openSidebar()  { $('sidebar').classList.add('open');    $('sidebar-overlay').classList.remove('hidden'); }
-export function closeSidebar() { $('sidebar').classList.remove('open'); $('sidebar-overlay').classList.add('hidden'); }
+export function openSidebar()  {
+  $('sidebar').classList.add('open');
+  $('sidebar-overlay').classList.remove('hidden');
+  syncFocusScope();
+}
+export function closeSidebar() {
+  $('sidebar').classList.remove('open');
+  $('sidebar-overlay').classList.add('hidden');
+  syncFocusScope();
+}
 export function closeSidebarOnMobile() { if (window.innerWidth <= 640) closeSidebar(); }
 
 export function initSidebarToggle() {

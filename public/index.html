@@ -27,6 +27,24 @@
     html.boot-ready #root {
       visibility: visible !important;
     }
+    /* If a cached/incomplete module cannot start, do not leave a standalone
+       iOS/Android window as a featureless dark screen. */
+    #boot-fallback {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      background: #0f172a;
+      color: #e2e8f0;
+      font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      text-align: center;
+    }
+    #boot-fallback-error { display: none; }
+    html.boot-ready #boot-fallback { display: none; }
+    html.boot-timeout #boot-fallback-loading { display: none; }
+    html.boot-timeout #boot-fallback-error { display: block; }
     /* Session deep-link: never show welcome calendar during boot */
     html.boot-restore #welcome {
       display: none !important;
@@ -45,7 +63,7 @@
       display: none !important;
     }
   </style>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#0f172a">
   <meta name="color-scheme" content="dark light">
@@ -65,10 +83,22 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
   <link id="hljs-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/highlight.min.js"></script>
-  <link rel="stylesheet" href="style.css?v=ui-9">
+  <link rel="stylesheet" href="style.css?v=ui-10">
 </head>
 <body class="h-dvh overflow-hidden flex flex-col bg-base-100 text-base-content">
   <div id="root" class="flex flex-col flex-1 overflow-hidden"></div>
-  <script type="module" src="app.js?v=ui-9"></script>
+  <div id="boot-fallback" role="status" aria-live="polite">
+    <div id="boot-fallback-loading">正在打开 Agent UI…</div>
+    <div id="boot-fallback-error">应用未能完成加载。请确认网络和服务可用，然后刷新或从主屏幕重新打开。</div>
+  </div>
+  <script>
+    setTimeout(function () {
+      if (document.documentElement.classList.contains('boot-pending')
+        && !document.documentElement.classList.contains('boot-ready')) {
+        document.documentElement.classList.add('boot-timeout');
+      }
+    }, 10000);
+  </script>
+  <script type="module" src="app.js?v=ui-10"></script>
 </body>
 </html>

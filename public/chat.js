@@ -787,7 +787,12 @@ function updateInputMode(value) {
   btn.classList.toggle('btn-primary', !isShell);
   btn.textContent = isShell ? 'Run' : 'Send';
   const label = AGENT_LABELS[currentAgent.peek()] || 'agent';
-  input.placeholder = isShell ? 'Shell command (without !)…' : `Ask ${label}… or !cmd for shell`;
+  const compact = typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches;
+  if (isShell) {
+    input.placeholder = compact ? 'Shell 命令…' : 'Shell command (without !)…';
+  } else {
+    input.placeholder = compact ? `问 ${label}…` : `Ask ${label}… or !cmd for shell`;
+  }
 }
 
 function chatInputMaxHeight() {
@@ -1098,8 +1103,8 @@ function appendTokenBar(text) {
   const msgs = $('messages');
   if (!msgs) return;
   msgs.insertAdjacentHTML('beforeend',
-    `<div class="flex items-center gap-1.5 px-1 py-0.5 text-[10px] font-mono text-base-content/30 select-none">
-       <span class="text-base-content/20">◈</span>${esc(text)}
+    `<div class="token-bar select-none">
+       <span class="token-bar-mark">◈</span><span class="token-bar-text">${esc(text)}</span>
      </div>`);
   stickBottom(msgs);
 }
@@ -1431,10 +1436,16 @@ export function initChat() {
 
   watch(chatDensity, () => applyChatDensity());
 
-  // Chat input: Enter = send, auto-resize, shell mode styling
+  // Chat input: ⌘/Ctrl+Enter = send. On phones, Enter sends (Shift+Enter newline).
   delegate.on('keydown', '#chat-input', e => {
-    const send = e.key === 'Enter' && (e.metaKey || e.ctrlKey);
-    if (send) { e.preventDefault(); sendMessage(); }
+    if (e.key !== 'Enter') return;
+    const combo = e.metaKey || e.ctrlKey;
+    const phone = window.matchMedia('(max-width: 640px)').matches && !e.shiftKey && !combo;
+    if (combo || phone) { e.preventDefault(); sendMessage(); }
+  });
+  delegate.on('submit', '#chat-form', e => {
+    e.preventDefault();
+    sendMessage();
   });
   delegate.on('input',   '#chat-input', (e, el) => { autoResize(el); updateInputMode(el.value); });
 
