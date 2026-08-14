@@ -62,6 +62,22 @@ ssh gpu2 "sudo systemctl restart claude-simple-edge"
 3. 参考 `/etc/systemd/system/claude-simple-edge.service`（gpu2 上那份）改 `MACHINE_ID`，其余环境变量（`MACHINE_TOKEN`、`GATEWAY_URL`）保持一致
 4. `systemctl enable --now claude-simple-edge`，看 hub 日志 `journalctl -u claude-simple-hub` 里出现 `Machine registered: <id>` 即成功
 
+### Edge 自动更新（≥0.2.1）
+
+`client.js` / `server.js` 默认启用 npm 自检更新：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `AUTO_UPDATE` | 开 | `0`/`false` 关闭 |
+| `AUTO_UPDATE_INTERVAL_HOURS` | `12` | 检查间隔（半天） |
+| `AUTO_UPDATE_APPLY` | 开 | `0` 只日志不安装 |
+| `AUTO_UPDATE_CHANNEL` | `latest` | dist-tag |
+| `AUTO_UPDATE_IDLE_WAIT_MS` | `1800000` | 有任务时最多等多久再更新 |
+
+发现 registry 上有更高版本时：`npm install -g claude-simple@…`，idle 后 `process.exit(0)`。  
+**systemd 需要 `Restart=on-success` 或 `Restart=always`**，否则退了不会起来。  
+从 **git 源码目录** 直接跑不会覆盖源码树，只会提示用 global 安装。
+
 ## 排障
 
 - Edge 连不上：`journalctl -u claude-simple-edge -n 50`，常见是证书校验失败（漏设 `NODE_TLS_REJECT_UNAUTHORIZED=0`）或 `MACHINE_TOKEN` 不一致

@@ -224,14 +224,21 @@ export function showSelectedDaySessions(sessions) {
   }).join('');
 }
 
+/** How many sessions in the topbar “最近” quick-jump menu. */
+export const RECENT_MENU_LIMIT = 15;
+
+function sortRecentSessions(sessions, limit) {
+  return [...asSessionArray(sessions)]
+    .filter(s => s && s.sessionId)
+    .sort((a, b) => (coerceTs(b.updatedAt) || 0) - (coerceTs(a.updatedAt) || 0))
+    .slice(0, limit);
+}
+
 export function updateRecentSessionsList(sessions) {
   const container = $('recent-sessions-list');
   if (!container) return;
 
-  sessions = asSessionArray(sessions);
-  const recent = [...sessions]
-    .sort((a, b) => (coerceTs(b.updatedAt) || 0) - (coerceTs(a.updatedAt) || 0))
-    .slice(0, 6);
+  const recent = sortRecentSessions(sessions, 6);
 
   if (!recent.length) {
     container.innerHTML = `<div class="col-span-full text-center text-xs text-base-content/40 py-4">No recent sessions</div>`;
@@ -255,6 +262,57 @@ export function updateRecentSessionsList(sessions) {
         </div>
         <div class="text-[9px] text-base-content/40 whitespace-nowrap self-start mt-0.5">${timeStr}</div>
       </div>`;
+  }).join('');
+}
+
+export function closeRecentMenu() {
+  $('recent-menu')?.classList.add('hidden');
+}
+
+/** Topbar quick-jump: last N sessions by updatedAt. */
+export function renderRecentSessionsMenu(sessions) {
+  const listEl = $('recent-menu-list');
+  const emptyEl = $('recent-menu-empty');
+  const countEl = $('recent-menu-count');
+  if (!listEl) return;
+
+  const recent = sortRecentSessions(sessions ?? getDashboardSessions(), RECENT_MENU_LIMIT);
+  if (countEl) countEl.textContent = recent.length ? `${recent.length}` : '';
+
+  if (!recent.length) {
+    listEl.innerHTML = '';
+    emptyEl?.classList.remove('hidden');
+    return;
+  }
+  emptyEl?.classList.add('hidden');
+
+  listEl.innerHTML = recent.map(s => {
+    const timeStr = formatTime(s.updatedAt);
+    const active = ctx.sessionId === s.sessionId
+      && (!s.machineId || !ctx.machineId || s.machineId === ctx.machineId);
+    const machine = s.machineId
+      ? `<span class="text-[9px] font-mono text-base-content/35 truncate max-w-[4.5rem]" title="${esc(s.machineId)}">@${esc(s.machineId)}</span>`
+      : '';
+    return `
+      <button type="button"
+        class="recent-menu-item w-full text-left px-2 py-1.5 rounded-md flex items-start gap-2
+               ${active ? 'bg-primary/15 text-primary' : 'hover:bg-base-200'}"
+        data-session-id="${esc(s.sessionId)}"
+        data-session-cwd="${esc(s.cwd || '')}"
+        data-session-config-dir="${esc(s.configDir || '')}"
+        data-session-agent="${esc(s.agent || 'claude')}"
+        data-session-machine="${esc(s.machineId || '')}">
+        <span class="flex-shrink-0 mt-0.5">${agentBadge(s.agent)}</span>
+        <span class="flex-1 min-w-0">
+          <span class="block text-xs font-semibold truncate leading-snug">${esc(sessionDisplayTitle(s))}</span>
+          <span class="block text-[10px] text-base-content/40 truncate mt-0.5">${esc(s.projectName || shortPath(s.cwd) || '—')}</span>
+        </span>
+        <span class="flex flex-col items-end gap-0.5 flex-shrink-0 self-start">
+          <span class="text-[9px] text-base-content/40 whitespace-nowrap">${esc(timeStr)}</span>
+          ${machine}
+          ${active ? '<span class="text-[9px] opacity-70">当前</span>' : ''}
+        </span>
+      </button>`;
   }).join('');
 }
 

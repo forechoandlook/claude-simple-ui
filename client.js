@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { createApp, init } from './src/app.js';
+import { createApp, init, hasBusyAgent } from './src/app.js';
+import { startAutoUpdate } from './src/auto-update.js';
 import { WebSocket } from 'ws';
 import os from 'os';
 import crypto from 'crypto';
@@ -18,12 +19,40 @@ const { server } = createApp();
 await new Promise(resolve => server.listen(LOCAL_PORT, '127.0.0.1', resolve));
 console.log(`[client] Local app listening on 127.0.0.1:${LOCAL_PORT}`);
 
+// Self-update from npm (default every 12h). Disable with AUTO_UPDATE=0.
+// Requires global install + systemd Restart= (or equivalent) for full apply.
+startAutoUpdate({ role: 'edge-client', isBusy: hasBusyAgent });
+
 // ─── Active WS tunnels: tunnelId → local WebSocket ───────────────────────────
 const tunnels = new Map();
 
 // ─── Gateway connection ───────────────────────────────────────────────────────
 let controlWs = null;
 let reconnectDelay = 1000;
+
+/** Drop hop-by-hop / encoding headers so hub clients see the decoded body. */
+function sanitizeProxyHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers || {})) {
+    const lk = k.toLowerCase();
+    if (
+      lk === 'content-encoding'
+      || lk === 'content-length'
+      || lk === 'transfer-encoding'
+      || lk === 'connection'
+      || lk === 'keep-alive'
+      || lk === 'proxy-authenticate'
+      || lk === 'proxy-authorization'
+      || lk === 'te'
+      || lk === 'trailer'
+      || lk === 'upgrade'
+    ) {
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
 
 function sendControl(msg) {
   if (controlWs?.readyState === WebSocket.OPEN) {
@@ -56,13 +85,22 @@ function connect() {
     if (msg.type === 'http-req') {
       try {
         const url = `http://127.0.0.1:${LOCAL_PORT}${msg.path}`;
+        // Node fetch auto-decompresses gzip/br. If we forward Content-Encoding
+        // with the already-plain body, browsers try to gunzip JSON and fail
+        // (chat history / large API payloads look "empty" or parse-error).
+        const reqHeaders = { ...(msg.headers || {}), host: `127.0.0.1:${LOCAL_PORT}` };
+        delete reqHeaders['accept-encoding'];
+        delete reqHeaders['Accept-Encoding'];
+        reqHeaders['Accept-Encoding'] = 'identity';
+
         const res = await fetch(url, {
           method: msg.method,
-          headers: { ...msg.headers, host: `127.0.0.1:${LOCAL_PORT}` },
+          headers: reqHeaders,
           body: msg.body || undefined,
         });
-        const headers = Object.fromEntries(res.headers.entries());
+        const headers = sanitizeProxyHeaders(Object.fromEntries(res.headers.entries()));
         const contentType = res.headers.get('content-type') || '';
+        const contentDisp = res.headers.get('content-disposition') || '';
 
         // SSE (and any other body-less-until-done response) is forwarded as
         // it arrives instead of buffered in full, so remote/hub viewers get
@@ -84,7 +122,30 @@ function connect() {
           return;
         }
 
+        // Binary responses (file downloads, images, …) must NOT go through
+        // res.text() — UTF-8 decoding corrupts bytes and downloads break on hub.
+        const isBinary =
+          /attachment/i.test(contentDisp)
+          || /^(application\/octet-stream|application\/pdf|application\/zip|application\/gzip|application\/x-|application\/vnd\.|image\/|audio\/|video\/|font\/)/i.test(contentType)
+          || (contentType !== '' && !/^(text\/|application\/(json|javascript|xml|problem\+json|x-www-form-urlencoded)|multipart\/)/i.test(contentType));
+
+        if (isBinary) {
+          const buf = Buffer.from(await res.arrayBuffer());
+          headers['content-length'] = String(buf.length);
+          sendControl({
+            type: 'http-res',
+            reqId: msg.reqId,
+            status: res.status,
+            headers,
+            body: buf.toString('base64'),
+            encoding: 'base64',
+          });
+          return;
+        }
+
         const body = await res.text();
+        // Body is always decoded text here — length must match UTF-8 bytes.
+        headers['content-length'] = String(Buffer.byteLength(body));
         sendControl({
           type: 'http-res',
           reqId: msg.reqId,

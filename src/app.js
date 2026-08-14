@@ -27,6 +27,9 @@ import {
 import { createMetaAgent } from './agents/meta-agent.js';
 import { discoverAllAgentModels } from './agents/models.js';
 import { createTextBatcher } from './agents/stream-batch.js';
+import { normalizeCommand, mapAgentEmit } from './runtime/protocol.js';
+import { createOutbox } from './runtime/outbox.js';
+import { resolveApproval, cancelApprovalsForSession } from './runtime/approvals.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..');
 
@@ -306,6 +309,21 @@ async function listSessions(filterCwd = null, agentFilter = null) {
   });
 }
 
+/**
+ * Wrap agent emit → map/filter → outbox (delta coalesce + batch frames).
+ * Agents may still call send() with UI-shaped events; unknown noise is dropped.
+ */
+function createAgentSend(outbox, agent) {
+  return (data) => {
+    const mapped = mapAgentEmit(data, { agent, compactTools: true });
+    // permission_request / already-mapped events: mapAgentEmit keeps known types
+    if (mapped) outbox.send(mapped);
+    else if (data?.type === 'permission_request' || data?.type === 'permission_resolved') {
+      outbox.send(data);
+    }
+  };
+}
+
 async function dispatchAgent(agent, command, options, send) {
   const a = (agent || 'claude').toLowerCase();
   if (!ENABLED_AGENTS.includes(a)) {
@@ -325,6 +343,7 @@ async function dispatchAgent(agent, command, options, send) {
 function abortSession(sessionId) {
   if (!sessionId) return false;
   let ok = false;
+  cancelApprovalsForSession(sessionId);
   // Grok/Codex may register under temp key + real sessionId — abort every match.
   for (const [key, s] of activeSessions) {
     if (key !== sessionId && s?.sessionId !== sessionId && s?.key !== sessionId) continue;
@@ -349,6 +368,14 @@ function isSessionBusy(sessionId) {
   return false;
 }
 
+/** True if any agent turn is in flight (used by auto-update before restart). */
+export function hasBusyAgent() {
+  for (const s of activeSessions.values()) {
+    if (s && s.busy !== false) return true;
+  }
+  return false;
+}
+
 function markSessionIdle(sessionId, tempKey) {
   for (const key of [sessionId, tempKey].filter(Boolean)) {
     const s = activeSessions.get(key);
@@ -356,7 +383,10 @@ function markSessionIdle(sessionId, tempKey) {
   }
 }
 
-/** Shrink history payloads: huge tool inputs dominate mobile transfers. */
+/** Max JSON chars kept per tool_use input in history payloads (traffic). */
+const HISTORY_TOOL_INPUT_MAX = 100;
+
+/** Shrink history payloads: tool inputs dominate mobile / hub transfers. */
 function compactHistoryMessages(messages) {
   if (!Array.isArray(messages)) return messages;
   return messages.map((m) => {
@@ -365,8 +395,15 @@ function compactHistoryMessages(messages) {
       let raw;
       try { raw = typeof m.input === 'string' ? m.input : JSON.stringify(m.input); }
       catch { raw = String(m.input); }
-      if (raw.length > 1600) {
-        return { ...m, input: { _truncated: true, preview: raw.slice(0, 1600), bytes: raw.length } };
+      if (raw.length > HISTORY_TOOL_INPUT_MAX) {
+        return {
+          ...m,
+          input: {
+            _truncated: true,
+            preview: raw.slice(0, HISTORY_TOOL_INPUT_MAX),
+            bytes: raw.length,
+          },
+        };
       }
     }
     if (m.type === 'text' && typeof m.content === 'string' && m.content.length > 48_000) {
@@ -380,8 +417,12 @@ function compactHistoryMessages(messages) {
 export function createApp() {
   const app = express();
 
-  // Gzip JSON/text API responses when client accepts it (hub tunnel + mobile).
+  // Gzip JSON/text API responses when client accepts it (mobile / direct browser).
+  // Skip for hub-proxied edge traffic: Node fetch auto-decompresses gzip while
+  // still advertising Content-Encoding, which breaks the browser after tunnel
+  // re-delivery. Control WS already uses perMessageDeflate.
   app.use((req, res, next) => {
+    if (req.headers['x-hub-token']) return next();
     const ae = req.headers['accept-encoding'] || '';
     if (!/\bgzip\b/i.test(ae) || req.method === 'HEAD') return next();
     const origJson = res.json.bind(res);
@@ -521,8 +562,12 @@ export function createApp() {
       const stat = await fs.stat(filePath);
       if (req.query.download === 'true') {
         const name = path.basename(filePath);
-        res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+        // ASCII fallback + RFC 5987 so Chinese / spaces filenames download correctly.
+        const ascii = name.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+        const star = encodeURIComponent(name).replace(/['()]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+        res.setHeader('Content-Disposition', `attachment; filename="${ascii || 'download'}"; filename*=UTF-8''${star}`);
         res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Cache-Control', 'no-store');
         return fsSync.createReadStream(filePath).pipe(res);
       }
       // Office / PDF / binary previews need more headroom than plain text
@@ -854,11 +899,11 @@ export function createApp() {
       const { sessionId } = req.params;
       if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: 'Invalid session id' });
       const preferred = typeof req.query.agent === 'string' ? req.query.agent : null;
-      // tail=0 → full history; default last 80 messages (mobile-friendly)
-      let tail = parseInt(req.query.tail ?? '80', 10);
-      if (Number.isNaN(tail)) tail = 80;
+      // tail=0 → full history (default). Positive = last N messages only.
+      let tail = parseInt(req.query.tail ?? '0', 10);
+      if (Number.isNaN(tail)) tail = 0;
       if (tail < 0) tail = 0;
-      if (tail > 2000) tail = 2000;
+      if (tail > 50_000) tail = 50_000;
       const compact = req.query.compact !== '0' && req.query.compact !== 'false';
       const opts = {
         claudeConfigDirs: CLAUDE_CONFIG_DIRS,
@@ -1257,7 +1302,8 @@ export function createApp() {
     const client = { ws, sessionId: url.searchParams.get('sessionId') || null };
     chatClients.add(client);
 
-    const send = (data) => {
+    // Broadcast to every chat socket on the same session (mobile reconnect / multi-tab).
+    const deliver = (data) => {
       if (data?.sessionId) client.sessionId = data.sessionId;
       broadcastChat(client.sessionId, data, ws);
     };
@@ -1271,6 +1317,15 @@ export function createApp() {
       sendJson(ws, { type: 'ping' });
     }, 35_000);
 
+    // Low-pressure outbox: coalesce deltas + optional multi-event batch frames
+    const outbox = createOutbox(deliver, {
+      maxWait: 48,
+      maxDeltaChars: 720,
+      maxBatchItems: 10,
+      maxBatchBytes: 10_000,
+    });
+    const wireSend = (data) => outbox.send(data);
+
     ws.on('message', async (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); }
@@ -1281,71 +1336,113 @@ export function createApp() {
         return;
       }
       if (msg.type === 'pong') return;
-      if (msg.type === 'subscribe') {
-        client.sessionId = msg.sessionId || client.sessionId || null;
-        sendJson(ws, {
+
+      const cmd = normalizeCommand(msg);
+      if (!cmd) return;
+
+      if (cmd.cmd === 'session.subscribe') {
+        client.sessionId = cmd.sessionId || client.sessionId || null;
+        wireSend({
           type: 'run-status',
           sessionId: client.sessionId,
           running: isSessionBusy(client.sessionId),
         });
+        outbox.flush();
         return;
       }
 
-      if (msg.type === 'claude-command' || msg.type === 'agent-command') {
-        const agent = msg.agent || msg.options?.agent || 'claude';
-        if (msg.options?.sessionId) client.sessionId = msg.options.sessionId;
-        // Wrap send so turn-complete events clear busy immediately (Grok process may linger).
+      if (cmd.cmd === 'approval.respond') {
+        const ok = resolveApproval(cmd.requestId, { allow: cmd.allow, always: cmd.always });
+        if (cmd.requestId) {
+          const elHint = { type: 'permission_resolved', requestId: cmd.requestId, allow: !!cmd.allow };
+          wireSend(elHint);
+        }
+        if (!ok) {
+          wireSend({ type: 'status', message: 'permission request expired or unknown' });
+        }
+        outbox.flush();
+        return;
+      }
+
+      if (cmd.cmd === 'turn.interrupt') {
+        const sid = cmd.sessionId;
+        const ok = abortSession(sid);
+        wireSend({ type: 'abort-result', success: ok, sessionId: sid });
+        outbox.flush();
+        return;
+      }
+
+      if (cmd.cmd === 'turn.start') {
+        const agent = cmd.agent || 'claude';
+        const options = { ...cmd.options };
+        if (cmd.sessionId) options.sessionId = cmd.sessionId;
+        if (cmd.cwd) options.cwd = cmd.cwd;
+        if (options.sessionId) client.sessionId = options.sessionId;
+        const agentSend = createAgentSend(outbox, agent);
         const runSend = (data) => {
           if (data?.type === 'result' || data?.type === 'complete' || data?.type === 'error') {
-            markSessionIdle(data.sessionId || client.sessionId, msg.options?.sessionId);
+            markSessionIdle(data.sessionId || client.sessionId, options.sessionId);
+            outbox.flush();
           }
           if (data?.sessionId) client.sessionId = data.sessionId;
-          send(data);
+          if (data?.type === 'session-created' && data.sessionId) client.sessionId = data.sessionId;
+          // permission_request bypasses map filter double-pass carefully
+          if (data?.type === 'permission_request' || data?.type === 'permission_resolved') {
+            outbox.send(data);
+            outbox.flush();
+            return;
+          }
+          agentSend(data);
         };
-        await dispatchAgent(agent, msg.command || '', msg.options || {}, runSend);
-      } else if (msg.type === 'shell-command') {
+        await dispatchAgent(agent, cmd.command || '', options, runSend);
+        outbox.flush();
+        return;
+      }
+
+      if (cmd.cmd === 'shell.exec') {
         if (shellProc) { try { shellProc.kill(); } catch {} shellProc = null; }
         shellOut?.flush();
         shellErr?.flush();
-        const cmd = msg.command || '';
-        const cwd = msg.cwd || os.homedir();
-        send({ type: 'shell-start', command: cmd });
-        shellProc = spawn(process.env.SHELL || 'bash', ['-c', cmd], {
+        const shellCmd = cmd.command || '';
+        const cwd = cmd.cwd || os.homedir();
+        wireSend({ type: 'shell-start', command: shellCmd });
+        shellProc = spawn(process.env.SHELL || 'bash', ['-c', shellCmd], {
           cwd,
           env: { ...process.env },
           shell: false,
         });
         shellOut = createTextBatcher(
-          (data) => send({ type: 'shell-output', stream: 'stdout', data }),
-          { maxWait: 40, maxSize: 2048 },
+          (data) => wireSend({ type: 'shell-output', stream: 'stdout', data }),
+          { maxWait: 48, maxSize: 3072 },
         );
         shellErr = createTextBatcher(
-          (data) => send({ type: 'shell-output', stream: 'stderr', data }),
-          { maxWait: 40, maxSize: 2048 },
+          (data) => wireSend({ type: 'shell-output', stream: 'stderr', data }),
+          { maxWait: 48, maxSize: 3072 },
         );
         shellProc.stdout.on('data', d => shellOut.push(d.toString()));
         shellProc.stderr.on('data', d => shellErr.push(d.toString()));
         shellProc.on('close', (code) => {
           shellOut?.flush();
           shellErr?.flush();
-          send({ type: 'shell-exit', code });
+          wireSend({ type: 'shell-exit', code });
+          outbox.flush();
           shellProc = null;
         });
         shellProc.on('error', (e) => {
           shellOut?.flush();
           shellErr?.flush();
-          send({ type: 'shell-exit', code: 1, error: e.message });
+          wireSend({ type: 'shell-exit', code: 1, error: e.message });
+          outbox.flush();
           shellProc = null;
         });
-      } else if (msg.type === 'abort-session') {
-        const ok = abortSession(msg.sessionId);
-        send({ type: 'abort-result', success: ok, sessionId: msg.sessionId });
+        return;
       }
     });
 
     ws.on('close', () => {
       chatClients.delete(client);
       clearInterval(heartbeat);
+      outbox.flush();
       shellOut?.flush();
       shellErr?.flush();
       if (shellProc) { try { shellProc.kill(); } catch {} }

@@ -24,7 +24,10 @@ import { initSettings, openSettings } from './settings.js';
 import { openMetaAgent, toggleMetaAgent } from './agent-panel.js';
 
 import { AuthScreen, AppShell } from './shell/templates.js';
-import { updateDashboard, shiftCalMonth, setSelectedCalDate, getDashboardSessions } from './shell/dashboard.js';
+import {
+  updateDashboard, shiftCalMonth, setSelectedCalDate, getDashboardSessions,
+  renderRecentSessionsMenu, closeRecentMenu,
+} from './shell/dashboard.js';
 import {
   loadAllSessions, loadWorkspaces, renderSessionList, syncSidebarChrome,
   refreshModelSelect, refreshEffortSelect, promptCustomModel,
@@ -50,6 +53,48 @@ import {
 
 // Re-export public API (app.js and others)
 export { showApp, resumeSession, switchTab, openProject, goHome, loadAllSessions };
+
+/** Visible install guide when browser has no beforeinstallprompt (iOS Safari etc.). */
+function showPwaInstallHelp() {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  let body;
+  if (isIOS) {
+    body = `<ol class="list-decimal pl-4 space-y-2 text-sm text-base-content/80">
+      <li>点底部分享按钮 <strong>分享</strong>（方框+向上箭头）</li>
+      <li>下滑找到并点 <strong>添加到主屏幕</strong></li>
+      <li>确认名称后点 <strong>添加</strong></li>
+    </ol>
+    <p class="text-xs text-base-content/50 mt-3">需用 <strong>Safari</strong> 打开本站；微信/Chrome 内置浏览器通常没有「添加到主屏幕」。</p>`;
+  } else if (isAndroid) {
+    body = `<ol class="list-decimal pl-4 space-y-2 text-sm text-base-content/80">
+      <li>点右上角菜单 <strong>⋮</strong></li>
+      <li>选择 <strong>安装应用</strong> 或 <strong>添加到主屏幕</strong></li>
+    </ol>
+    <p class="text-xs text-base-content/50 mt-3">若菜单里没有该项：请用 <strong>Chrome</strong> 打开，并先接受本站证书提示。自签 HTTPS 下部分机型不弹出一键安装。</p>`;
+  } else {
+    body = `<p class="text-sm text-base-content/80">请在浏览器菜单中选择 <strong>安装应用 / 安装网页应用 / 添加到主屏幕</strong>。</p>
+    <p class="text-xs text-base-content/50 mt-3">Chrome / Edge 地址栏右侧有时也会出现安装图标。</p>`;
+  }
+  let dlg = document.getElementById('modal-pwa-install');
+  if (!dlg) {
+    dlg = document.createElement('dialog');
+    dlg.id = 'modal-pwa-install';
+    dlg.className = 'modal';
+    document.body.appendChild(dlg);
+  }
+  dlg.innerHTML = `
+    <div class="modal-box max-w-sm">
+      <h3 class="font-bold text-base mb-3">安装到主屏幕</h3>
+      ${body}
+      <div class="modal-action">
+        <form method="dialog"><button class="btn btn-sm">知道了</button></form>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>`;
+  dlg.showModal();
+}
 
 export async function initAuth() {
   const authScreen = $('auth-screen');
@@ -300,15 +345,10 @@ export function initShell(opts = {}) {
   });
   delegate.on('click', '#btn-pwa-install', async () => {
     const ok = await promptPwaInstall();
-    if (!ok) {
-      // iOS / browsers without beforeinstallprompt
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-      appendSystemMsg(
-        isIOS
-          ? 'iOS：点分享 →「添加到主屏幕」即可安装'
-          : '请使用浏览器菜单「安装应用 / 添加到主屏幕」',
-      );
-    }
+    if (ok) return;
+    // iOS / browsers without beforeinstallprompt: chat system messages are easy
+    // to miss (no open session / wrong tab). Always show a modal.
+    showPwaInstallHelp();
   });
   document.addEventListener('pwa-installable', () => {
     document.getElementById('btn-pwa-install')?.classList.remove('hidden');
@@ -518,6 +558,7 @@ export function initShell(opts = {}) {
   });
   delegate.on('click', '#btn-machine-menu', async e => {
     e.stopPropagation();
+    closeRecentMenu();
     const menu = $('machine-menu');
     if (!menu) return;
     if (menu.classList.contains('hidden')) {
@@ -528,9 +569,27 @@ export function initShell(opts = {}) {
       menu.classList.add('hidden');
     }
   });
+  delegate.on('click', '#btn-recent-sessions', e => {
+    e.stopPropagation();
+    closeMachineMenu();
+    const menu = $('recent-menu');
+    if (!menu) return;
+    if (menu.classList.contains('hidden')) {
+      renderRecentSessionsMenu(getDashboardSessions());
+      menu.classList.remove('hidden');
+    } else {
+      menu.classList.add('hidden');
+    }
+  });
   document.addEventListener('click', e => {
-    const wrap = $('machine-menu-wrap');
-    if (wrap && !wrap.contains(e.target)) closeMachineMenu();
+    const machineWrap = $('machine-menu-wrap');
+    if (machineWrap && !machineWrap.contains(e.target)) closeMachineMenu();
+    const recentWrap = $('recent-menu-wrap');
+    if (recentWrap && !recentWrap.contains(e.target)) closeRecentMenu();
+  });
+  // After picking a session from the topbar menu, close it (row click also resumes).
+  delegate.on('click', '#recent-menu [data-session-id]', () => {
+    closeRecentMenu();
   });
 
   delegate.on('click', '#btn-edit-project-notes, #project-goal-text, #project-notes-text', () => {

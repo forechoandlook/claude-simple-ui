@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -75,11 +77,32 @@ type ctrlMsg struct {
 	Path      string            `json:"path,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Body      string            `json:"body,omitempty"`
-	Status    int               `json:"status,omitempty"`
-	TunnelID  string            `json:"tunnelId,omitempty"`
-	Query     string            `json:"query,omitempty"`
-	Data      string            `json:"data,omitempty"`
-	Message   string            `json:"message,omitempty"`
+	// Encoding is "base64" when Body holds binary (file downloads). Empty = UTF-8 text.
+	Encoding string `json:"encoding,omitempty"`
+	Status   int    `json:"status,omitempty"`
+	TunnelID string `json:"tunnelId,omitempty"`
+	Query    string `json:"query,omitempty"`
+	Data     string `json:"data,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
+// bodyBytes decodes Body according to Encoding (base64 for binary downloads).
+func (m *ctrlMsg) bodyBytes() []byte {
+	if m == nil {
+		return nil
+	}
+	if strings.EqualFold(m.Encoding, "base64") {
+		decoded, err := base64.StdEncoding.DecodeString(m.Body)
+		if err == nil {
+			return decoded
+		}
+		// Tolerate missing padding from older edges.
+		decoded, err = base64.RawStdEncoding.DecodeString(m.Body)
+		if err == nil {
+			return decoded
+		}
+	}
+	return []byte(m.Body)
 }
 
 // ── machine registry ──────────────────────────────────────────────────────────
@@ -122,6 +145,7 @@ func (b *browserSock) write(mt int, data []byte) error {
 
 type gateway struct {
 	token string
+	store *hubStore
 
 	mu       sync.RWMutex
 	machines map[string]*machine
@@ -135,8 +159,16 @@ type gateway struct {
 }
 
 func newGateway(token string) *gateway {
+	dataDir := os.Getenv("HUB_DATA_DIR")
+	if dataDir == "" {
+		dataDir = os.Getenv("DATA_DIR")
+	}
+	if dataDir == "" {
+		dataDir = filepath.Join(".", "hub-data")
+	}
 	return &gateway{
 		token:         token,
+		store:         newHubStore(dataDir),
 		machines:      make(map[string]*machine),
 		pending:       make(map[string]*pendingHTTP),
 		pendingTun:    make(map[string]*pendingTunnel),
@@ -264,7 +296,16 @@ func (g *gateway) forwardHTTPStream(machineID, method, path string, headers map[
 	flusher, _ := w.(http.Flusher)
 	headersWritten := false
 	writeHead := func(status int, hdrs map[string]string) {
-		skip := map[string]bool{"transfer-encoding": true, "connection": true, "keep-alive": true}
+		// Edge client.js uses fetch(), which auto-decompresses gzip/br and
+		// still returns Content-Encoding. Body on the control channel is
+		// always plain text — never re-advertise compression to the browser.
+		skip := map[string]bool{
+			"transfer-encoding": true,
+			"connection":        true,
+			"keep-alive":        true,
+			"content-encoding":  true,
+			"content-length":    true, // recompute below for one-shot bodies
+		}
 		for k, v := range hdrs {
 			if skip[strings.ToLower(k)] {
 				continue
@@ -287,8 +328,12 @@ func (g *gateway) forwardHTTPStream(machineID, method, path string, headers map[
 			}
 			switch msg.Type {
 			case "http-res": // legacy one-shot reply (non-streamed)
+				bodyBytes := msg.bodyBytes()
+				// Content-Length of the decoded body (encoding headers stripped in writeHead).
+				// Always recompute: edge may advertise pre-base64 or wrong length.
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 				writeHead(msg.Status, msg.Headers)
-				_, _ = w.Write([]byte(msg.Body))
+				_, _ = w.Write(bodyBytes)
 				return nil
 			case "http-res-start":
 				writeHead(msg.Status, msg.Headers)
@@ -776,7 +821,10 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.handleAggregateActivity(w, r)
 		return
 	case path == "/api/sessions/meta":
-		g.handleSessionMetaPut(w, r)
+		g.handleSessionMeta(w, r)
+		return
+	case path == "/api/projects/notes":
+		g.handleProjectNotes(w, r)
 		return
 	case strings.HasPrefix(path, "/api/"):
 		g.handleProxiedAPI(w, r)
@@ -819,7 +867,8 @@ func main() {
 	}
 
 	log.Printf("Hub %s listening on %s", version, addr)
-	log.Printf("WebUI: embedded in binary")
+	log.Printf("Hub data dir:    %s (session meta + project notes)", g.store.dir)
+	log.Printf("WebUI: embedded in binary (PUBLIC_DIR overrides)")
 	log.Printf("Edges register:  ws://<host>/machine-connect  (header X-Machine-Token)")
 	log.Printf("Hub login:       HUB_USERNAME / HUB_PASSWORD (default admin / MACHINE_TOKEN)")
 	log.Printf("Health:          http://<host>/healthz")

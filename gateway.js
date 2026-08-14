@@ -229,11 +229,16 @@ app.all('/machine/:machineId/*', async (req, res) => {
     }, body);
 
     // Don't forward hop-by-hop headers
-    const skip = new Set(['transfer-encoding', 'connection', 'keep-alive']);
+    const skip = new Set(['transfer-encoding', 'connection', 'keep-alive', 'content-length']);
     Object.entries(result.headers || {}).forEach(([k, v]) => {
       if (!skip.has(k.toLowerCase())) res.setHeader(k, v);
     });
-    res.status(result.status).send(result.body);
+    // Edge sends binary downloads as base64 (see client.js encoding:'base64').
+    let body = result.body ?? '';
+    if (String(result.encoding || '').toLowerCase() === 'base64' && typeof body === 'string') {
+      body = Buffer.from(body, 'base64');
+    }
+    res.status(result.status).send(body);
   } catch (e) {
     res.status(502).json({ error: e.message });
   }

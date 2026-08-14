@@ -2,19 +2,110 @@
 @media (min-width: 641px) { #hamburger { display: none !important; } }
 @media (max-width: 640px) {
   #sidebar {
-    position: fixed; top: 44px; left: 0; bottom: 0;
+    position: fixed;
+    top: calc(44px + env(safe-area-inset-top, 0px));
+    left: 0;
+    bottom: 0;
     transform: translateX(-100%); z-index: 10;
     transition: transform .2s ease;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   #sidebar.open { transform: translateX(0); box-shadow: 4px 0 20px rgba(0,0,0,.4); }
+
+  /* Compact chat composer on phones — less height, less dead space under bar */
+  #composer-row {
+    gap: 0.4rem;
+    padding: 0.4rem 0.55rem 0.35rem !important;
+  }
+  #chat-input.chat-input,
+  #chat-input {
+    min-height: 36px !important;
+    max-height: 96px !important;
+    padding: 0.4rem 0.65rem !important;
+    border-radius: 0.65rem;
+    /* 16px prevents iOS Safari auto-zoom on focus */
+    font-size: 16px !important;
+    line-height: 1.35 !important;
+  }
+  #btn-opts,
+  #send-btn,
+  #stop-btn {
+    height: 36px !important;
+    min-height: 36px !important;
+    padding-left: 0.65rem;
+    padding-right: 0.65rem;
+  }
+  #chat-opts {
+    padding-top: 0.35rem !important;
+    padding-left: 0.55rem !important;
+    padding-right: 0.55rem !important;
+    gap: 0.35rem !important;
+  }
+  #scroll-nav {
+    bottom: 4.5rem !important;
+  }
+  /* File list actions always visible on touch (no hover) */
+  .file-row-action {
+    opacity: 1 !important;
+  }
 }
 
-/* PWA standalone: safe areas (notch / home indicator) */
+/* File row actions: hover-reveal on desktop only */
+@media (min-width: 641px) {
+  .file-row-action {
+    opacity: 0;
+  }
+  .group:hover .file-row-action,
+  .group:focus-within .file-row-action {
+    opacity: 1;
+  }
+}
+
+/*
+ * Safe areas (PWA + mobile Safari with viewport-fit=cover):
+ * Do NOT pad the whole body (that leaves a dead empty strip under the chat bar).
+ * Paint chrome into the insets; only inset interactive content.
+ */
+html, body {
+  height: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+html.pwa-standalone,
 html.pwa-standalone body {
-  padding-top: env(safe-area-inset-top, 0);
-  padding-bottom: env(safe-area-inset-bottom, 0);
-  padding-left: env(safe-area-inset-left, 0);
-  padding-right: env(safe-area-inset-right, 0);
+  background: oklch(var(--b1));
+}
+/* Top bar: extend under status bar, push content below notch */
+html.pwa-standalone #topbar {
+  padding-top: env(safe-area-inset-top, 0px);
+  min-height: calc(44px + env(safe-area-inset-top, 0px));
+  height: auto !important;
+  padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
+  padding-right: max(0.75rem, env(safe-area-inset-right, 0px));
+}
+/*
+ * Chat composer: background fills home-indicator inset.
+ * Inner #composer-row already has small padding; only add safe-area beyond that
+ * so we don't stack large empty strips under the input.
+ */
+#chat-composer {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+/* Welcome / machine picker full-screen panels */
+html.pwa-standalone #welcome,
+html.pwa-standalone #machine-picker {
+  padding-top: max(1rem, env(safe-area-inset-top, 0px));
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+  padding-left: max(1rem, env(safe-area-inset-left, 0px));
+  padding-right: max(1rem, env(safe-area-inset-right, 0px));
+}
+/* Meta agent drawer bottom */
+html.pwa-standalone #meta-agent-panel,
+html.pwa-standalone .ma-panel {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 #conn-dot {
@@ -792,6 +883,12 @@ html.pwa-standalone body {
 
 /* ── Chat composer ───────────────────────────────────────────────────────── */
 /* Single outer border only — no DaisyUI nested focus ring / inner outline. */
+#composer-row #btn-opts,
+#composer-row #send-btn,
+#composer-row #stop-btn {
+  height: 40px;
+  min-height: 40px;
+}
 #chat-input.chat-input,
 #chat-input {
   width: 100%;
@@ -807,6 +904,45 @@ html.pwa-standalone body {
   --tw-ring-shadow: 0 0 #0000 !important;
   --tw-ring-offset-shadow: 0 0 #0000 !important;
   transition: border-color .15s ease;
+  /* Avoid iOS inherited large text scaling making the box look oversized */
+  -webkit-text-size-adjust: 100%;
+}
+/* Kill browser password/contact autofill widgets (side checkmarks / arrows) */
+#chat-input::-webkit-contacts-auto-fill-button,
+#chat-input::-webkit-credentials-auto-fill-button,
+#chat-input::-webkit-strong-password-auto-fill-button,
+#ma-input::-webkit-contacts-auto-fill-button,
+#ma-input::-webkit-credentials-auto-fill-button {
+  visibility: hidden !important;
+  display: none !important;
+  pointer-events: none !important;
+  position: absolute !important;
+  right: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  opacity: 0 !important;
+}
+#chat-input:-webkit-autofill,
+#chat-input:-webkit-autofill:hover,
+#chat-input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--color-base-100) inset !important;
+  transition: background-color 99999s ease-in-out 0s;
+}
+
+/* Recent sessions topbar menu */
+#recent-menu {
+  min-width: 16rem;
+}
+@media (max-width: 640px) {
+  #recent-menu-wrap #recent-menu {
+    position: fixed;
+    left: 0.5rem;
+    right: 0.5rem;
+    width: auto;
+    max-width: none;
+  }
 }
 #chat-input:focus,
 #chat-input:focus-visible {

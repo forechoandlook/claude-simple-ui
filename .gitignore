@@ -17,3 +17,5 @@ tmp
 gateway/dist/
 gateway/web/*
 !gateway/web/.gitkeep
+
+.playwright-cli/

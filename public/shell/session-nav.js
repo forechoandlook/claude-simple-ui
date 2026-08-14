@@ -3,7 +3,7 @@ import { batch, esc, $ } from '../lib.js';
 import {
   sessionsData, sessionFilter, filesPath, viewingFile, filteredSessions,
   currentProject, currentTab, filesRoot, gitRoot, currentAgent, setAgent,
-  selectedMachineId, setSelectedMachine, AGENT_LABELS, ctx,
+  selectedMachineId, setSelectedMachine, AGENT_LABELS, ctx, hubMode,
 } from '../state.js';
 import { api } from '../api.js';
 import { getLastSessionContext, setLastSessionContext } from './session-context.js';
@@ -182,14 +182,23 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
       for (; i < end; i++) {
         const m = msgs[i];
         const ts = coerceTs(m.ts ?? m.timestamp);
-        if (m.type === 'text') {
+        // Accept both normalized history rows and a few legacy shapes.
+        const typ = m.type || (m.role ? 'text' : null);
+        if (typ === 'text' || (m.role && m.content != null && !m.name)) {
           if (m.role === 'assistant' || m.role === 'user') flushToolBatch();
-          appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : label, m.content, { ts });
-        } else if (m.type === 'tool_use') {
-          renderToolUse({ name: m.name, input: m.input ?? {} }, { ts });
-        } else if (m.type === 'token_usage') {
+          const content = typeof m.content === 'string'
+            ? m.content
+            : (Array.isArray(m.content)
+              ? m.content.map(p => p?.text || '').filter(Boolean).join('\n')
+              : String(m.content ?? ''));
+          if (content) {
+            appendMsg(m.role === 'user' ? 'user' : 'assistant', m.role === 'user' ? 'You' : label, content, { ts });
+          }
+        } else if (typ === 'tool_use' || m.name) {
+          renderToolUse({ name: m.name || 'tool', input: m.input ?? m.arguments ?? {} }, { ts });
+        } else if (typ === 'token_usage' || m.usage) {
           flushToolBatch();
-          appendHistoryTokenBar(m.usage);
+          appendHistoryTokenBar(m.usage || m);
         }
       }
       if (i < msgs.length) {
@@ -209,29 +218,52 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
   };
 
   const loadHistory = async () => {
-    // Instant re-open from in-memory cache
+    // Instant re-open from in-memory cache (never trust empty cache — race/stale)
     const cached = historyCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < HISTORY_CACHE_TTL) {
+    if (cached && cached.msgs?.length && Date.now() - cached.at < HISTORY_CACHE_TTL) {
       paintMessages(cached.msgs, cached.context, cached.meta);
       return;
     }
     appendSystemMsg(`Loading ${label} history…`);
     try {
-      // Smaller tail + compact tool payloads on mobile / Save-Data.
-      const saveData = typeof navigator !== 'undefined' && (
-        navigator.connection?.saveData
-        || /Mobi|Android|iPhone/i.test(navigator.userAgent || '')
-      );
-      const tail = saveData ? '50' : '80';
-      const q = new URLSearchParams({ agent: resolvedAgent, tail, compact: '1' });
-      const data = await api('GET', `/api/sessions/${sid}/messages?${q}`);
-      const msgs = Array.isArray(data) ? data : (data.messages || []);
-      const context = Array.isArray(data) ? null : (data.context || null);
-      const meta = Array.isArray(data) ? {} : { truncated: data.truncated, total: data.total };
-      historyCache.set(cacheKey, { msgs, context, meta, at: Date.now() });
+      // Hub mode must route to the edge that owns the session.
+      const mid = resolvedMachine || selectedMachineId.peek() || ctx.machineId || null;
+      if (hubMode.peek() && !mid) {
+        throw new Error('未选择机器，无法加载历史');
+      }
+      if (mid && ctx.machineId !== mid) setSelectedMachine(mid);
+
+      // Full history (tail=0); tool inputs compacted server-side (~100 chars each).
+      const fetchMsgs = async (agent) => {
+        const q = new URLSearchParams({
+          tail: '0',
+          compact: '1',
+        });
+        if (agent) q.set('agent', agent);
+        // Also put machine in query for proxies that drop custom headers.
+        if (mid) q.set('machine', mid);
+        return api('GET', `/api/sessions/${sid}/messages?${q}`, undefined, undefined, {
+          machineId: mid || undefined,
+          dedupe: false,
+        });
+      };
+
+      let data = await fetchMsgs(resolvedAgent);
+      let msgs = Array.isArray(data) ? data : (data?.messages || []);
+      // Prefer stated agent; if empty, retry scanning all agents on the edge.
+      if (!msgs.length && resolvedAgent) {
+        data = await fetchMsgs(null);
+        msgs = Array.isArray(data) ? data : (data?.messages || []);
+      }
+
+      const context = Array.isArray(data) ? null : (data?.context || null);
+      const meta = Array.isArray(data) ? {} : { truncated: data?.truncated, total: data?.total };
+      if (msgs.length) historyCache.set(cacheKey, { msgs, context, meta, at: Date.now() });
+      else historyCache.delete(cacheKey);
       paintMessages(msgs, context, meta);
     } catch (e) {
       if (ctx.sessionId !== sid) return;
+      historyCache.delete(cacheKey);
       $('messages').innerHTML = '';
       appendSystemMsg(`${label} · ${sid.slice(0, 8)}… (history unavailable: ${e.message})`);
     }

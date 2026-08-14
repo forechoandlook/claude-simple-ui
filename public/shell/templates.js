@@ -39,7 +39,7 @@ export const AppShell = (opts = {}) => {
   return `
   <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-[9]"></div>
   <div id="app" class="${appHidden} flex-col flex-1 overflow-hidden" style="${appStyle}">
-    <div class="flex items-center gap-2 px-3 bg-base-200 border-b border-base-300 flex-shrink-0" style="height:44px">
+    <div id="topbar" class="flex items-center gap-2 px-3 bg-base-200 border-b border-base-300 flex-shrink-0" style="height:44px">
       <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
       <span id="btn-home" class="font-semibold text-sm hidden sm:inline cursor-pointer hover:text-primary transition-colors select-none">🤖 Agent UI</span>
       <span class="text-base-300 hidden sm:inline">/</span>
@@ -60,7 +60,23 @@ export const AppShell = (opts = {}) => {
           <p id="machine-menu-empty" class="text-xs text-base-content/40 px-1 py-2 hidden">暂无机器在线</p>
         </div>
       </div>
-      <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate">Select a session</span>
+      <div id="recent-menu-wrap" class="relative flex-shrink-0">
+        <button type="button" id="btn-recent-sessions" class="btn btn-ghost btn-xs border border-base-300 gap-1"
+                title="最近会话 / 快速跳转">
+          <span>最近</span>
+          <span class="text-[10px] opacity-50">▾</span>
+        </button>
+        <div id="recent-menu" class="hidden absolute left-0 top-full mt-1 z-50 w-80 max-h-[min(24rem,70vh)] overflow-y-auto
+             rounded-lg border border-base-300 bg-base-100 shadow-xl p-2">
+          <div class="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-base-300 sticky top-0 bg-base-100 z-[1]">
+            <span class="text-[10px] uppercase tracking-wide text-base-content/45 font-semibold">Recent sessions</span>
+            <span id="recent-menu-count" class="text-[10px] text-base-content/35 font-mono"></span>
+          </div>
+          <div id="recent-menu-list" class="flex flex-col gap-0.5"></div>
+          <p id="recent-menu-empty" class="text-xs text-base-content/40 px-1 py-2 hidden">暂无最近会话</p>
+        </div>
+      </div>
+      <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate min-w-0">Select a session</span>
       <span id="conn-dot" class="w-2 h-2 rounded-full bg-base-content/30 flex-shrink-0" title="连接状态"></span>
       <div class="flex gap-2">
         <button id="btn-refresh-conn" class="btn btn-ghost btn-xs border border-base-300" title="重新连接并同步">↻</button>
@@ -219,7 +235,7 @@ export const AppShell = (opts = {}) => {
               <button id="scroll-bottom-btn" class="scroll-fab hidden" title="Jump to bottom">↓</button>
             </div>
             <div id="permission-requests"></div>
-            <div class="flex flex-col border-t border-base-300 bg-base-200 flex-shrink-0">
+            <div id="chat-composer" class="flex flex-col border-t border-base-300 bg-base-200 flex-shrink-0">
               <div id="chat-opts" class="hidden flex items-center gap-1.5 px-3 pt-2 flex-wrap">
                 <select id="sel-agent" class="select select-xs select-bordered text-xs font-semibold" title="Agent">
                   <option value="claude">Claude</option>
@@ -263,13 +279,21 @@ export const AppShell = (opts = {}) => {
                   <option value="full">density: full</option>
                 </select>
               </div>
-              <div class="flex gap-2 items-end px-3 pt-2 pb-2">
-                <button id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options" style="height:40px">⚙</button>
+              <div id="composer-row" class="flex gap-2 items-end px-3 pt-2 pb-2">
+                <button id="btn-opts" class="btn btn-ghost btn-sm px-2 text-base-content/30 hover:text-base-content flex-shrink-0" title="Options">⚙</button>
                 <textarea id="chat-input" rows="1" placeholder="Ask… (!cmd shell · ⌘↵ send)"
                   class="chat-input flex-1 text-sm resize-none leading-relaxed"
-                  style="min-height:40px;max-height:140px"></textarea>
-                <button id="send-btn" class="btn btn-primary btn-sm flex-shrink-0" style="height:40px">Send</button>
-                <button id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0" style="height:40px">■</button>
+                  name="agent-chat-message"
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-form-type="other"
+                  data-bwignore="true"></textarea>
+                <button id="send-btn" class="btn btn-primary btn-sm flex-shrink-0">Send</button>
+                <button id="stop-btn" class="btn btn-error btn-sm hidden flex-shrink-0">■</button>
               </div>
             </div>
           </div>

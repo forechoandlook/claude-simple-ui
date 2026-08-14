@@ -111,7 +111,7 @@ function fileChrome(path, size, kindLabel) {
   return `
     <div class="flex items-center gap-2 px-4 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">
       <span class="text-xs text-base-content/40 flex-1 truncate">${esc(path)} · ${esc(sizeStr)}${kindLabel ? ` · <span class="text-primary/70">${esc(kindLabel)}</span>` : ''}</span>
-      <button class="btn btn-ghost btn-xs" data-download-path="${esc(path)}">↓ Download</button>
+      <button type="button" class="btn btn-ghost btn-xs" data-download-path="${esc(path)}">↓ Download</button>
     </div>`;
 }
 
@@ -127,10 +127,10 @@ function renderDir(files) {
       <span class="cursor-pointer flex-shrink-0">${f.isDir ? '📁' : fileIcon(f.name)}</span>
       <span class="text-sm flex-1 truncate cursor-pointer ${f.isDir ? 'text-primary' : ''}">${esc(f.name)}</span>
       ${!f.isDir ? `
-        <button class="opacity-0 group-hover:opacity-100 btn btn-ghost btn-xs px-1 text-base-content/40 hover:text-base-content"
-                data-download-path="${esc(f.path)}" title="Download">↓</button>
-        <button class="opacity-0 group-hover:opacity-100 btn btn-ghost btn-xs px-1 text-error/60 hover:text-error"
-                data-delete-path="${esc(f.path)}" title="Delete">✕</button>` : ''}
+        <button type="button" class="file-row-action btn btn-ghost btn-xs px-1.5 text-base-content/50 hover:text-base-content"
+                data-download-path="${esc(f.path)}" title="Download" aria-label="Download">↓</button>
+        <button type="button" class="file-row-action btn btn-ghost btn-xs px-1.5 text-error/60 hover:text-error"
+                data-delete-path="${esc(f.path)}" title="Delete" aria-label="Delete">✕</button>` : ''}
     </div>`).join('');
 }
 
@@ -343,19 +343,52 @@ function triggerUpload() {
   input.click();
 }
 
-function downloadFile(proj, filePath) {
+async function downloadFile(proj, filePath) {
   const root = filesRoot.peek() || proj?.path || '';
+  if (!root) {
+    alert('No path selected — set root first');
+    return;
+  }
   const id = proj?.id || '_';
-  const qs = authQuery({
-    root,
-    path: filePath,
-    download: 'true',
-  });
+  const name = (filePath || '').split('/').pop() || 'download';
+  // Prefer Authorization header (no token in URL / logs). authQuery kept as
+  // fallback for environments that only support plain navigations.
+  const qs = new URLSearchParams({ root, path: filePath, download: 'true' });
   const url = `/api/projects/${id}/file?${qs}`;
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filePath.split('/').pop();
-  a.click();
+  try {
+    const res = await fetch(url, { headers: authHeaders(), credentials: 'same-origin' });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = name;
+    a.rel = 'noopener';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // iOS may need the URL briefly; revoke after a beat.
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch (e) {
+    // Last resort: open with token query (works when fetch is blocked, e.g. some WebViews).
+    try {
+      const fallback = `/api/projects/${id}/file?${authQuery({ root, path: filePath, download: 'true' })}`;
+      const a = document.createElement('a');
+      a.href = fallback;
+      a.download = name;
+      a.rel = 'noopener';
+      a.target = '_blank';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch {
+      alert(`Download failed: ${e.message}`);
+    }
+  }
 }
 
 async function deleteFile(proj, filePath) {
@@ -447,13 +480,19 @@ export function initFilesTab() {
   delegate.on('click', '[data-dir-path]', (_, el) => { viewingFile.value = null; filesPath.value = el.dataset.dirPath; });
   delegate.on('click', '[data-file-path]', (_, el) => { viewingFile.value = el.dataset.filePath; });
   delegate.on('click', '#btn-upload', () => triggerUpload());
-  delegate.on('click', '[data-download-path]', (_, el) => {
-    const proj = currentProject.peek();
-    if (proj) downloadFile(proj, el.dataset.downloadPath);
+  delegate.on('click', '[data-download-path]', (e, el) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const path = el.dataset.downloadPath;
+    if (!path) return;
+    downloadFile(currentProject.peek(), path);
   });
-  delegate.on('click', '[data-delete-path]', (_, el) => {
-    const proj = currentProject.peek();
-    if (proj) deleteFile(proj, el.dataset.deletePath);
+  delegate.on('click', '[data-delete-path]', (e, el) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const path = el.dataset.deletePath;
+    if (!path) return;
+    deleteFile(currentProject.peek(), path);
   });
   // Excel sheet tabs
   delegate.on('click', '.office-sheet-tab', (_, el) => {

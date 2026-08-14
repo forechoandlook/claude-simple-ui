@@ -165,7 +165,8 @@ function isMetaEmpty(m) {
 }
 
 export async function toggleSessionFavorite(sessionId, agent, { machineId } = {}) {
-  const key = metaKey(agent, sessionId, machineId);
+  const mid = machineId || ctx.machineId || null;
+  const key = metaKey(agent, sessionId, mid);
   const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
   const nextFav = !prev.favorite;
   sessionMetaMap.value = {
@@ -173,7 +174,9 @@ export async function toggleSessionFavorite(sessionId, agent, { machineId } = {}
     [key]: { ...prev, favorite: nextFav, updatedAt: Date.now() },
   };
   try {
-    const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, favorite: nextFav });
+    const res = await api('PUT', '/api/sessions/meta', {
+      sessionId, agent, favorite: nextFav, machineId: mid || undefined,
+    }, undefined, { machineId: mid || undefined });
     sessionMetaMap.value = {
       ...sessionMetaMap.peek(),
       [key]: mergeMeta(prev, {
@@ -193,7 +196,8 @@ export async function toggleSessionFavorite(sessionId, agent, { machineId } = {}
 /** Hide / unhide a session (soft archive in the sidebar). */
 export async function toggleSessionHidden(sessionId, agent, { machineId } = {}) {
   if (!sessionId) return false;
-  const key = metaKey(agent, sessionId, machineId);
+  const mid = machineId || ctx.machineId || null;
+  const key = metaKey(agent, sessionId, mid);
   const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
   const nextHidden = !prev.hidden;
   sessionMetaMap.value = {
@@ -201,7 +205,9 @@ export async function toggleSessionHidden(sessionId, agent, { machineId } = {}) 
     [key]: { ...prev, hidden: nextHidden, updatedAt: Date.now() },
   };
   try {
-    const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, hidden: nextHidden });
+    const res = await api('PUT', '/api/sessions/meta', {
+      sessionId, agent, hidden: nextHidden, machineId: mid || undefined,
+    }, undefined, { machineId: mid || undefined });
     const next = mergeMeta(prev, {
       favorite: res.favorite,
       notes: res.notes,
@@ -224,11 +230,17 @@ export async function toggleSessionHidden(sessionId, agent, { machineId } = {}) 
   return true;
 }
 
-export async function saveSessionNotes(sessionId, agent, notes) {
-  const key = metaKey(agent, sessionId);
+export async function saveSessionNotes(sessionId, agent, notes, { machineId } = {}) {
+  const mid = machineId || ctx.machineId || null;
+  const key = metaKey(agent, sessionId, mid);
   const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
   try {
-    const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, notes });
+    const res = await api('PUT', '/api/sessions/meta', {
+      sessionId,
+      agent,
+      notes,
+      machineId: mid || undefined,
+    }, undefined, { machineId: mid || undefined });
     sessionMetaMap.value = {
       ...sessionMetaMap.peek(),
       [key]: mergeMeta(prev, {
@@ -251,7 +263,8 @@ export async function saveSessionNotes(sessionId, agent, notes) {
  */
 export async function renameSession(sessionId, agent, title, { machineId } = {}) {
   if (!sessionId) return false;
-  const key = metaKey(agent, sessionId, machineId);
+  const mid = machineId || ctx.machineId || null;
+  const key = metaKey(agent, sessionId, mid);
   const prev = sessionMetaMap.peek()?.[key] || emptyMeta();
   const nextTitle = String(title || '').trim().slice(0, 200);
   sessionMetaMap.value = {
@@ -259,7 +272,9 @@ export async function renameSession(sessionId, agent, title, { machineId } = {})
     [key]: { ...prev, title: nextTitle, updatedAt: Date.now() },
   };
   try {
-    const res = await api('PUT', '/api/sessions/meta', { sessionId, agent, title: nextTitle });
+    const res = await api('PUT', '/api/sessions/meta', {
+      sessionId, agent, title: nextTitle, machineId: mid || undefined,
+    }, undefined, { machineId: mid || undefined });
     const next = mergeMeta(prev, {
       favorite: res.favorite,
       notes: res.notes,

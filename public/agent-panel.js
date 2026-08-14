@@ -118,7 +118,16 @@ function panelHTML() {
           </label>
           <textarea id="ma-input" rows="1" placeholder="继续提问… (⌘↵ 发送) · 历史会话会带着上下文"
             class="textarea textarea-bordered flex-1 text-sm resize-none leading-relaxed"
-            style="min-height:40px;max-height:120px"></textarea>
+            style="min-height:40px;max-height:120px"
+            name="meta-agent-message"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-form-type="other"
+            data-bwignore="true"></textarea>
           <button type="button" id="ma-send" class="btn btn-primary btn-sm" style="height:40px">发送</button>
         </div>
       </div>

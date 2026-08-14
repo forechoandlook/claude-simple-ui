@@ -257,6 +257,11 @@ function markTurnDone() {
 }
 
 function handleWsMessage(msg) {
+  // Server outbox may pack multiple events into one frame
+  if (msg.type === 'batch' && Array.isArray(msg.items)) {
+    for (const item of msg.items) handleWsMessage(item);
+    return;
+  }
   if (msg.type === 'session-created') {
     ctx.sessionId = msg.sessionId;
     if (msg.agent) setAgent(msg.agent);
@@ -373,6 +378,11 @@ function handleWsMessage(msg) {
     return;
   }
 
+  if (msg.type === 'permission_resolved') {
+    const id = msg.requestId || msg.request_id;
+    if (id) $(`perm-${id}`)?.remove();
+    return;
+  }
   if (msg.type === 'permission_request' || (msg.request_id && msg.tool_name))
     renderPermissionRequest(msg);
 }
@@ -715,7 +725,13 @@ export function sendMessage() {
   const now = Date.now();
   if (text.startsWith('!')) {
     appendMsg('shell', '$ Shell', text.slice(1).trim(), { ts: now });
-    const ok = sendWs({ type: 'shell-command', command: text.slice(1).trim(), cwd: currentProject.peek().path });
+    // Typed control plane (legacy shell-command still accepted server-side)
+    const ok = sendWs({
+      type: 'command',
+      cmd: 'shell.exec',
+      command: text.slice(1).trim(),
+      cwd: currentProject.peek().path,
+    });
     if (!ok) appendSystemMsg('连接未就绪，命令已入队，重连后发送');
   } else {
     flushToolBatch();
@@ -723,22 +739,31 @@ export function sendMessage() {
     const effort     = currentEffort.peek();
     const permission = currentPermission.peek();
     const agent      = currentAgent.peek() || 'claude';
-    const ok = sendWs({ type: 'agent-command', agent, command: text, options: {
+    const ok = sendWs({
+      type: 'command',
+      cmd: 'turn.start',
       agent,
-      cwd:       currentProject.peek().path,
+      command: text,
       sessionId: ctx.sessionId,
-      configDir: ctx.configDir,
-      model:     currentModel.peek(),
-      ...(effort     && { effort }),
-      ...(permission && permission !== 'default' && { permissionMode: permission }),
-      ...(permission === 'bypassPermissions' && { allowDangerouslySkipPermissions: true }),
-    }});
+      options: {
+        agent,
+        cwd:       currentProject.peek().path,
+        sessionId: ctx.sessionId,
+        configDir: ctx.configDir,
+        model:     currentModel.peek(),
+        ...(effort     && { effort }),
+        ...(permission && permission !== 'default' && { permissionMode: permission }),
+        ...(permission === 'bypassPermissions' && { allowDangerouslySkipPermissions: true }),
+      },
+    });
     if (!ok) appendSystemMsg('连接未就绪，消息已入队，重连后发送');
   }
 }
 
 export function stopProcessing() {
-  if (ctx.sessionId) sendWs({ type: 'abort-session', sessionId: ctx.sessionId });
+  if (ctx.sessionId) {
+    sendWs({ type: 'command', cmd: 'turn.interrupt', sessionId: ctx.sessionId });
+  }
   pendingUserText = null;
   markTurnDone();
 }
@@ -763,9 +788,17 @@ function updateInputMode(value) {
   input.placeholder = isShell ? 'Shell command (without !)…' : `Ask ${label}… or !cmd for shell`;
 }
 
+function chatInputMaxHeight() {
+  // Keep in sync with #chat-input max-height in style.css (mobile vs desktop).
+  if (typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches) {
+    return 96;
+  }
+  return 140;
+}
+
 function autoResize(el) {
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  el.style.height = Math.min(el.scrollHeight, chatInputMaxHeight()) + 'px';
 }
 
 // ── Message rendering ─────────────────────────────────────────────────────────
@@ -1282,9 +1315,15 @@ export function initChat() {
   });
   delegate.on('input',   '#chat-input', (e, el) => { autoResize(el); updateInputMode(el.value); });
 
-  // Permission buttons
+  // Permission buttons → approval.respond (typed control plane)
   delegate.on('click', '[data-perm-id]', (e, el) => {
-    sendWs({ type: 'claude-permission-response', requestId: el.dataset.permId, allow: el.dataset.permAllow === '1' });
+    sendWs({
+      type: 'command',
+      cmd: 'approval.respond',
+      requestId: el.dataset.permId,
+      allow: el.dataset.permAllow === '1',
+      sessionId: ctx.sessionId,
+    });
     el.closest('.perm-banner')?.remove();
   });
 
