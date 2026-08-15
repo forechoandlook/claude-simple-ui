@@ -1069,6 +1069,7 @@ export function createApp() {
     toClientSession,
     getProjectNotesStore: loadProjectNotes,
     saveProjectNotesStore: saveProjectNotes,
+    getSessionMetaStore: loadSessionMeta,
     normalizeProjectEntry,
     git,
     isGitRepo,
@@ -1138,6 +1139,50 @@ export function createApp() {
       const includeMessages = req.query.messages !== '0';
       const digest = await meta.buildDigest({ days, agent, includeMessages });
       res.json(digest);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/ai/notes', authMiddleware, async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit || '30', 10) || 30, 200);
+      const scope = typeof req.query.scope === 'string' ? req.query.scope : 'all';
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : '';
+      const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+      const agent = typeof req.query.agent === 'string' ? req.query.agent : '';
+      res.json({
+        notes: await meta.listMetaNotes({ limit, scope, q, cwd, sessionId, agent }),
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/ai/notes/:id', authMiddleware, async (req, res) => {
+    try {
+      const note = await meta.getMetaNote(req.params.id);
+      if (!note) return res.status(404).json({ error: 'not found' });
+      res.json(note);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/ai/notes', authMiddleware, async (req, res) => {
+    try {
+      const note = await meta.saveMetaNote(req.body || {});
+      res.json(note);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/ai/notes/:id', authMiddleware, async (req, res) => {
+    try {
+      const result = await meta.deleteMetaNote(req.params.id);
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

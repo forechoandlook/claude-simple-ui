@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +44,9 @@ func (g *gateway) isHubLocalAPI(path string) bool {
 		path == "/api/auth/status", path == "/api/auth/login", path == "/api/auth/register",
 		path == "/api/sessions", path == "/api/projects", path == "/api/activity",
 		path == "/api/sessions/meta",
-		path == "/api/projects/notes":
+		path == "/api/projects/notes",
+		path == "/api/ai/notes",
+		strings.HasPrefix(path, "/api/ai/notes/"):
 		return true
 	default:
 		return false
@@ -606,6 +611,148 @@ func (g *gateway) handleProjectNotes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"success": true})
+		return
+
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+func newMetaNoteID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+func (g *gateway) handleMetaNotes(w http.ResponseWriter, r *http.Request) {
+	if _, ok := g.requireHubAuth(w, r); !ok {
+		return
+	}
+
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	noteID := ""
+	if len(pathParts) >= 4 {
+		noteID = strings.TrimSpace(pathParts[3])
+	}
+	machineID := r.Header.Get("X-Machine-Id")
+	if machineID == "" {
+		machineID = r.URL.Query().Get("machine")
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		if noteID != "" {
+			note, ok := g.store.getMetaNote(noteID)
+			if !ok {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			writeJSON(w, note)
+			return
+		}
+		scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+		queryText := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		cwd := r.URL.Query().Get("cwd")
+		sessionID := r.URL.Query().Get("sessionId")
+		agent := r.URL.Query().Get("agent")
+		limit := 30
+		if _, err := fmt.Sscanf(strings.TrimSpace(r.URL.Query().Get("limit")), "%d", &limit); err != nil {
+			limit = 30
+		}
+		if limit <= 0 || limit > 200 {
+			limit = 30
+		}
+		rows := g.store.listMetaNotes()
+		filtered := make([]metaNoteEntry, 0, len(rows))
+		for _, note := range rows {
+			if machineID != "" && note.MachineID != machineID {
+				continue
+			}
+			if scope != "" && scope != "all" && note.Scope != scope {
+				continue
+			}
+			if cwd != "" && note.Cwd != cwd {
+				continue
+			}
+			if sessionID != "" && note.SessionID != sessionID {
+				continue
+			}
+			if agent != "" && note.Agent != agent {
+				continue
+			}
+			if queryText != "" {
+				hay := strings.ToLower(note.Title + "\n" + note.Content + "\n" + strings.Join(note.Tags, " "))
+				if !strings.Contains(hay, queryText) {
+					continue
+				}
+			}
+			filtered = append(filtered, note)
+		}
+		sort.SliceStable(filtered, func(i, j int) bool {
+			if filtered[i].Pinned != filtered[j].Pinned {
+				return filtered[i].Pinned
+			}
+			return filtered[i].UpdatedAt > filtered[j].UpdatedAt
+		})
+		if len(filtered) > limit {
+			filtered = filtered[:limit]
+		}
+		writeJSON(w, map[string]any{"notes": filtered})
+		return
+
+	case http.MethodPost, http.MethodPut:
+		var body metaNoteEntry
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+			http.Error(w, `{"error":"bad json"}`, http.StatusBadRequest)
+			return
+		}
+		body.Title = strings.TrimSpace(body.Title)
+		body.Content = strings.TrimSpace(body.Content)
+		if body.Title == "" || body.Content == "" {
+			http.Error(w, `{"error":"title and content required"}`, http.StatusBadRequest)
+			return
+		}
+		if body.ID == "" {
+			body.ID = newMetaNoteID()
+		}
+		now := time.Now().UnixMilli()
+		if prev, ok := g.store.getMetaNote(body.ID); ok {
+			body.CreatedAt = prev.CreatedAt
+		} else {
+			body.CreatedAt = now
+		}
+		body.UpdatedAt = now
+		if body.MachineID == "" {
+			body.MachineID = machineID
+		}
+		if body.Scope == "" {
+			switch {
+			case body.SessionID != "":
+				body.Scope = "session"
+			case body.Cwd != "":
+				body.Scope = "project"
+			default:
+				body.Scope = "general"
+			}
+		}
+		saved, err := g.store.putMetaNote(body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, saved)
+		return
+
+	case http.MethodDelete:
+		if noteID == "" {
+			http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := g.store.deleteMetaNote(noteID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
 		return
 
 	default:

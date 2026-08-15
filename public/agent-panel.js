@@ -4,7 +4,7 @@
  */
 import { esc, $ } from './lib.js';
 import { api, authHeaders, currentMachineId } from './api.js';
-import { hubMode, ctx } from './state.js';
+import { hubMode, ctx, currentAgent, currentProject } from './state.js';
 
 let panelOpen = false;
 let mode = 'chat'; // chat | report | history | config
@@ -19,6 +19,10 @@ let autoTimer = null;
 let lastAutoDay = localStorage.getItem('ai_last_auto_report') || '';
 let historyCache = [];
 let historySearch = '';
+let notesCache = [];
+let notesSearch = '';
+let editingNoteId = null;
+let currentNoteSnapshot = null;
 const LAST_SESSION_KEY = 'ma_last_session_id';
 
 function mdHtml(text) {
@@ -90,6 +94,7 @@ function panelHTML() {
         <div class="flex items-center gap-1">
           <button type="button" id="ma-btn-chat" class="btn btn-xs btn-ghost border border-primary/40 text-primary">对话</button>
           <button type="button" id="ma-btn-history" class="btn btn-xs btn-ghost border border-base-300" title="历史对话">历史</button>
+          <button type="button" id="ma-btn-notes" class="btn btn-xs btn-ghost border border-base-300" title="工作记事">记事</button>
           <button type="button" id="ma-btn-report" class="btn btn-xs btn-ghost border border-base-300">报告</button>
           <button type="button" id="ma-btn-config" class="btn btn-xs btn-ghost border border-base-300" title="AI 配置">⚙</button>
           <button type="button" id="ma-btn-close" class="btn btn-xs btn-ghost" data-ma-close="1">✕</button>
@@ -143,6 +148,56 @@ function panelHTML() {
         <p class="text-[10px] text-base-content/40 px-3 py-2 border-t border-base-300 flex-shrink-0">
           点击会话可查看完整记录；发送新消息即 resume（保留 tool / VLM 上下文）。
         </p>
+      </div>
+
+      <div id="ma-mode-notes" class="meta-agent-body hidden flex min-h-0 flex-1">
+        <div class="w-[44%] min-w-[180px] max-w-[240px] border-r border-base-300 flex flex-col">
+          <div class="flex items-center gap-2 px-3 py-2 border-b border-base-300 flex-shrink-0">
+            <input id="ma-notes-search" type="search" placeholder="搜索记事…"
+              class="input input-xs input-bordered flex-1 text-xs" autocomplete="off">
+            <button type="button" id="ma-notes-refresh" class="btn btn-ghost btn-xs">↻</button>
+            <button type="button" id="ma-notes-new" class="btn btn-primary btn-xs">＋</button>
+          </div>
+          <div id="ma-notes-list" class="flex-1 overflow-y-auto p-2 flex flex-col gap-1"></div>
+        </div>
+        <div class="flex-1 min-w-0 flex flex-col">
+          <div class="px-3 py-2 border-b border-base-300 text-[11px] text-base-content/45 flex items-center gap-2 flex-wrap">
+            <span>记事保存在 Hub，可被 Meta Agent 检索。</span>
+            <span id="ma-note-links" class="truncate"></span>
+          </div>
+          <div class="p-3 flex flex-col gap-3 flex-1 overflow-y-auto">
+            <label class="form-control">
+              <span class="label-text text-xs">标题</span>
+              <input id="ma-note-title" class="input input-sm input-bordered text-sm" placeholder="例如：发布前遗留问题">
+            </label>
+            <label class="form-control flex-1">
+              <span class="label-text text-xs">内容</span>
+              <textarea id="ma-note-content" class="textarea textarea-bordered text-sm min-h-[220px]" placeholder="记录决策、风险、待办、排查线索…"></textarea>
+            </label>
+            <div class="flex flex-wrap items-center gap-3 text-xs">
+              <label class="flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" id="ma-note-pin" class="checkbox checkbox-xs">
+                置顶
+              </label>
+              <label class="flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" id="ma-note-link-project" class="checkbox checkbox-xs">
+                关联当前项目
+              </label>
+              <label class="flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" id="ma-note-link-session" class="checkbox checkbox-xs">
+                关联当前 session
+              </label>
+            </div>
+            <div class="flex items-center justify-between gap-2">
+              <span id="ma-note-status" class="text-xs text-base-content/45"></span>
+              <div class="flex items-center gap-2">
+                <button type="button" id="ma-note-ask" class="btn btn-ghost btn-sm">快捷提问</button>
+                <button type="button" id="ma-note-delete" class="btn btn-ghost btn-sm text-error">删除</button>
+                <button type="button" id="ma-note-save" class="btn btn-primary btn-sm">保存记事</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div id="ma-mode-report" class="meta-agent-body hidden flex-col min-h-0 flex-1">
@@ -214,11 +269,13 @@ function setMode(m) {
   mode = m;
   const chat = $('ma-mode-chat');
   const history = $('ma-mode-history');
+  const notes = $('ma-mode-notes');
   const report = $('ma-mode-report');
   const config = $('ma-mode-config');
   for (const [el, key] of [
     [chat, 'chat'],
     [history, 'history'],
+    [notes, 'notes'],
     [report, 'report'],
     [config, 'config'],
   ]) {
@@ -235,8 +292,10 @@ function setMode(m) {
   };
   tab('ma-btn-chat', m === 'chat');
   tab('ma-btn-history', m === 'history');
+  tab('ma-btn-notes', m === 'notes');
   tab('ma-btn-report', m === 'report');
   if (m === 'history') renderHistoryList();
+  if (m === 'notes') renderNotesList();
 }
 
 function updateSessionChrome() {
@@ -482,6 +541,155 @@ async function refreshHistoryCache() {
     historyCache = [];
   }
   return historyCache;
+}
+
+function currentNoteLinks() {
+  const proj = currentProject.peek();
+  const sessionLinked = ctx.sessionId ? `${ctx.agent || currentAgent.peek() || 'claude'}:${ctx.sessionId.slice(0, 8)}` : '';
+  return {
+    project: proj?.path || '',
+    sessionId: ctx.sessionId || '',
+    agent: ctx.agent || currentAgent.peek() || 'claude',
+    summary: [
+      proj?.name ? `项目 ${proj.name}` : '',
+      sessionLinked ? `会话 ${sessionLinked}` : '',
+    ].filter(Boolean).join(' · '),
+  };
+}
+
+function resetNoteEditor() {
+  editingNoteId = null;
+  currentNoteSnapshot = null;
+  $('ma-note-title').value = '';
+  $('ma-note-content').value = '';
+  $('ma-note-pin').checked = false;
+  $('ma-note-link-project').checked = !!currentProject.peek()?.path;
+  $('ma-note-link-session').checked = !!ctx.sessionId;
+  $('ma-note-status').textContent = '新记事';
+  $('ma-note-delete').disabled = true;
+  $('ma-note-links').textContent = currentNoteLinks().summary || '未关联上下文';
+}
+
+function fillNoteEditor(note) {
+  editingNoteId = note?.id || null;
+  currentNoteSnapshot = note || null;
+  $('ma-note-title').value = note?.title || '';
+  $('ma-note-content').value = note?.content || '';
+  $('ma-note-pin').checked = !!note?.pinned;
+  $('ma-note-link-project').checked = !!note?.cwd;
+  $('ma-note-link-session').checked = !!note?.sessionId;
+  $('ma-note-status').textContent = note?.updatedAt ? `上次更新 ${fmtSessionWhen(note.updatedAt)}` : '';
+  $('ma-note-delete').disabled = !note?.id;
+  const links = [];
+  if (note?.cwd) links.push(`项目 ${note.cwd.split('/').pop()}`);
+  if (note?.sessionId) links.push(`会话 ${(note.agent || 'claude')}:${note.sessionId.slice(0, 8)}`);
+  $('ma-note-links').textContent = links.join(' · ') || '未关联上下文';
+}
+
+function askFromCurrentNote() {
+  const title = $('ma-note-title')?.value?.trim() || '';
+  const content = $('ma-note-content')?.value?.trim() || '';
+  if (!title && !content) {
+    $('ma-note-status').textContent = '先选一条记事或输入内容';
+    return;
+  }
+  const links = [];
+  if ($('ma-note-link-project')?.checked && currentProject.peek()?.path) {
+    links.push(`项目路径：${currentProject.peek().path}`);
+  }
+  if ($('ma-note-link-session')?.checked && ctx.sessionId) {
+    links.push(`关联会话：${ctx.agent || currentAgent.peek() || 'claude'} / ${ctx.sessionId}`);
+  }
+  const prompt = [
+    '基于下面这条工作记事回答，并结合相关会话与项目上下文：',
+    `标题：${title || '未命名'}`,
+    content ? `内容：\n${content}` : '',
+    links.length ? links.join('\n') : '',
+    '',
+    '请先总结这条记事的核心，再给出下一步建议和可能风险。',
+  ].filter(Boolean).join('\n');
+  setMode('chat');
+  $('ma-input').value = prompt;
+  $('ma-input').dispatchEvent(new Event('input'));
+  $('ma-input').focus();
+}
+
+async function refreshNotesCache() {
+  const q = (notesSearch || '').trim();
+  const data = await api('GET', `/api/ai/notes?limit=80${q ? `&q=${encodeURIComponent(q)}` : ''}`);
+  notesCache = data.notes || [];
+  return notesCache;
+}
+
+function renderNotesList() {
+  const list = $('ma-notes-list');
+  if (!list) return;
+  if (!notesCache.length) {
+    list.innerHTML = '<div class="text-center text-xs text-base-content/40 py-10">还没有记事。</div>';
+    return;
+  }
+  list.innerHTML = notesCache.map((note) => {
+    const active = note.id === editingNoteId;
+    const tags = [
+      note.scope === 'project' ? '项目' : note.scope === 'session' ? '会话' : '通用',
+      note.pinned ? '置顶' : '',
+    ].filter(Boolean).join(' · ');
+    return `
+      <button type="button" class="ma-note-item ${active ? 'active' : ''}" data-note-id="${esc(note.id)}">
+        <div class="text-left">
+          <div class="font-medium text-xs truncate">${esc(note.title || '未命名')}</div>
+          <div class="text-[10px] text-base-content/45 mt-0.5 line-clamp-2">${esc(note.content || '')}</div>
+          <div class="text-[10px] text-base-content/35 mt-1">${esc(tags)}${tags ? ' · ' : ''}${esc(fmtSessionWhen(note.updatedAt) || '')}</div>
+        </div>
+      </button>`;
+  }).join('');
+  list.querySelectorAll('[data-note-id]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        const note = await api('GET', `/api/ai/notes/${btn.dataset.noteId}`);
+        fillNoteEditor(note);
+        renderNotesList();
+      } catch (e) {
+        $('ma-note-status').textContent = e.message;
+      }
+    });
+  });
+}
+
+async function saveCurrentNote() {
+  const title = $('ma-note-title')?.value?.trim() || '';
+  const content = $('ma-note-content')?.value?.trim() || '';
+  if (!title || !content) {
+    $('ma-note-status').textContent = '标题和内容都不能为空';
+    return;
+  }
+  const links = currentNoteLinks();
+  const body = {
+    id: editingNoteId || undefined,
+    title,
+    content,
+    pinned: !!$('ma-note-pin')?.checked,
+    cwd: $('ma-note-link-project')?.checked ? links.project : '',
+    sessionId: $('ma-note-link-session')?.checked ? links.sessionId : '',
+    agent: $('ma-note-link-session')?.checked ? links.agent : '',
+  };
+  $('ma-note-status').textContent = '保存中…';
+  const note = await api('POST', '/api/ai/notes', body);
+  fillNoteEditor(note);
+  await refreshNotesCache();
+  renderNotesList();
+}
+
+async function deleteCurrentNoteEditor() {
+  if (!editingNoteId) {
+    resetNoteEditor();
+    return;
+  }
+  if (!confirm('删除这条记事？不可恢复。')) return;
+  await api('DELETE', `/api/ai/notes/${editingNoteId}`);
+  resetNoteEditor();
+  await refreshNotesCache();
+  renderNotesList();
 }
 
 function renderHistoryList() {
@@ -986,6 +1194,11 @@ export function initMetaAgent() {
     await refreshHistoryCache();
     setMode('history');
   });
+  $('ma-btn-notes')?.addEventListener('click', async () => {
+    await refreshNotesCache();
+    if (!editingNoteId) resetNoteEditor();
+    setMode('notes');
+  });
   $('ma-open-history')?.addEventListener('click', async () => {
     await refreshHistoryCache();
     setMode('history');
@@ -1042,6 +1255,35 @@ export function initMetaAgent() {
   });
   $('ma-gen-report')?.addEventListener('click', generateReport);
   $('ma-load-reports')?.addEventListener('click', loadReportList);
+  $('ma-notes-refresh')?.addEventListener('click', async () => {
+    await refreshNotesCache();
+    renderNotesList();
+  });
+  $('ma-notes-new')?.addEventListener('click', () => {
+    resetNoteEditor();
+    renderNotesList();
+    $('ma-note-title')?.focus();
+  });
+  $('ma-notes-search')?.addEventListener('input', async (e) => {
+    notesSearch = e.target.value || '';
+    await refreshNotesCache();
+    renderNotesList();
+  });
+  $('ma-note-save')?.addEventListener('click', async () => {
+    try {
+      await saveCurrentNote();
+    } catch (e) {
+      $('ma-note-status').textContent = e.message;
+    }
+  });
+  $('ma-note-delete')?.addEventListener('click', async () => {
+    try {
+      await deleteCurrentNoteEditor();
+    } catch (e) {
+      $('ma-note-status').textContent = e.message;
+    }
+  });
+  $('ma-note-ask')?.addEventListener('click', askFromCurrentNote);
   $('ma-cfg-save')?.addEventListener('click', saveConfig);
   $('ma-auto-report')?.addEventListener('change', async () => {
     try {
@@ -1114,6 +1356,7 @@ export function initMetaAgent() {
   // status + selected machine are known (boot.js / hub.js), not here: at this
   // point probeHub() hasn't resolved yet, so hubMode always reads as false.
   loadSession(null, { silent: true });
+  resetNoteEditor();
 }
 
 /**
@@ -1124,6 +1367,7 @@ export function loadMetaAgentBoot() {
   if (!ctx.token) return;
   if (hubMode.peek() && !currentMachineId()) return;
   refreshHistoryCache();
+  refreshNotesCache().catch(() => {});
   api('GET', '/api/ai/config').then(scheduleAutoReport).catch(() => {});
 }
 

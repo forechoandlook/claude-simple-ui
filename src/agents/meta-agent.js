@@ -41,7 +41,7 @@ export const AI_DEFAULTS = {
 export const DEFAULT_SYSTEM = `你是 Claude Simple UI 的内置工作助手（Meta Agent）。你能访问本机上的 Claude / Codex / Grok 会话、项目笔记、Git 与文件，并生成「我做了啥」的工作报告。
 
 规则：
-1. 需要会话 id / 项目路径时，先 list_projects 或 search_activity / list_sessions，再深入 get_session_summary。用户要求分析某个 session 的原始记录时，调用 get_session_jsonl；它返回保留原始结构的 JSONL 行，可分页继续读取。
+1. 需要会话 id / 项目路径时，先 list_projects 或 search_activity / list_sessions，再深入 get_session_brief / get_session_summary。超长会话先读 get_session_brief；只有需要逐事件定位问题时才读 get_session_jsonl。
 2. 回答要具体：引用项目路径、会话标题、时间范围；不确定就再查。
 3. 写日报/周报用 generate_activity_digest 拉快照，再组织成清晰 Markdown（亮点、按项目、未完成、建议）。
 4. 改文件或跑命令前说明意图；危险命令拒绝（rm -rf /、格式化磁盘等）。
@@ -136,6 +136,22 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'get_session_brief',
+      description: '读取会话压缩上下文，适合非常长的 session；包含项目/会话备注、关键用户意图与最近进展',
+      parameters: {
+        type: 'object',
+        required: ['sessionId'],
+        properties: {
+          sessionId: { type: 'string' },
+          agent: { type: 'string' },
+          maxTurns: { type: 'integer', description: '默认 6，返回多少个采样转折点' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_session_jsonl',
       description: '读取 Claude/Codex/Grok 指定会话的原始 JSONL 行，用于逐事件、工具调用或失败原因分析；内容可能敏感，只在当前回答中使用',
       parameters: {
@@ -174,6 +190,62 @@ const TOOLS = [
           cwd: { type: 'string' },
           goal: { type: 'string' },
           notes: { type: 'string' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_meta_notes',
+      description: '列出 Meta Notes（Hub 侧持久化工作笔记）',
+      parameters: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['all', 'project', 'session', 'general'], description: '默认 all' },
+          q: { type: 'string', description: '按标题/正文搜索' },
+          cwd: { type: 'string', description: '按项目路径过滤' },
+          sessionId: { type: 'string', description: '按 session 过滤' },
+          agent: { type: 'string', description: 'session 过滤时可指定 agent' },
+          limit: { type: 'integer', description: '默认 30' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'save_meta_note',
+      description: '创建或更新一条 Meta Note，可关联项目或 session',
+      parameters: {
+        type: 'object',
+        required: ['title', 'content'],
+        properties: {
+          id: { type: 'string' },
+          title: { type: 'string' },
+          content: { type: 'string' },
+          cwd: { type: 'string' },
+          sessionId: { type: 'string' },
+          agent: { type: 'string' },
+          pinned: { type: 'boolean' },
+          tags: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_meta_note',
+      description: '删除一条 Meta Note',
+      parameters: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' },
         },
       },
     },
@@ -421,6 +493,7 @@ export function createMetaAgent(deps) {
     toClientSession,
     getProjectNotesStore,
     saveProjectNotesStore,
+    getSessionMetaStore,
     normalizeProjectEntry,
     git,
     isGitRepo,
@@ -435,6 +508,8 @@ export function createMetaAgent(deps) {
   const aiDir = process.env.AI_DATA_DIR
     ? expandPath(process.env.AI_DATA_DIR)
     : path.join(rootDir, '.ai');
+  const notesFile = path.join(aiDir, 'meta-notes.json');
+  const sessionBriefsFile = path.join(aiDir, 'session-briefs.json');
   const sessionsDir = path.join(aiDir, 'sessions');
   /** @deprecated global vlm — only for one-time migration */
   const legacyGlobalVlmDir = path.join(aiDir, 'vlm');
@@ -479,6 +554,8 @@ export function createMetaAgent(deps) {
 
   let configCache = null;
   let reportsCache = null;
+  let notesCache = null;
+  let sessionBriefsCache = null;
   /** @type {{ version: number, sessions: Array<{id,title,createdAt,updatedAt,messageCount}> } | null} */
   let sessionsIndexCache = null;
   /** in-memory cache of full sessions (id → session) */
@@ -493,6 +570,42 @@ export function createMetaAgent(deps) {
 
   async function ensureAiDirs() {
     await fs.mkdir(sessionsDir, { recursive: true });
+  }
+
+  async function loadNotesStore() {
+    if (notesCache) return notesCache;
+    await ensureAiDirs();
+    try {
+      const raw = JSON.parse(await fs.readFile(notesFile, 'utf8'));
+      notesCache = {
+        version: raw.version || 1,
+        notes: Array.isArray(raw.notes) ? raw.notes : [],
+      };
+    } catch {
+      notesCache = { version: 1, notes: [] };
+    }
+    return notesCache;
+  }
+
+  async function saveNotesStore() {
+    if (!notesCache) return;
+    await atomicWriteJson(notesFile, notesCache);
+  }
+
+  async function loadSessionBriefsStore() {
+    if (sessionBriefsCache) return sessionBriefsCache;
+    await ensureAiDirs();
+    try {
+      sessionBriefsCache = JSON.parse(await fs.readFile(sessionBriefsFile, 'utf8'));
+    } catch {
+      sessionBriefsCache = {};
+    }
+    return sessionBriefsCache;
+  }
+
+  async function saveSessionBriefsStore() {
+    if (!sessionBriefsCache) return;
+    await atomicWriteJson(sessionBriefsFile, sessionBriefsCache);
   }
 
   async function atomicWriteText(filePath, text) {
@@ -934,6 +1047,178 @@ export function createMetaAgent(deps) {
       if (t) return shortTitle(t, 80);
     }
     return '';
+  }
+
+  function extractRoleText(message) {
+    if (!message) return '';
+    const text = extractTextParts(message.content ?? message.message?.content ?? message.text);
+    return String(text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function pickSample(items, count) {
+    if (!Array.isArray(items) || !items.length) return [];
+    if (items.length <= count) return items.slice();
+    const out = [];
+    const last = items.length - 1;
+    for (let i = 0; i < count; i += 1) {
+      const idx = Math.round((i * last) / Math.max(1, count - 1));
+      out.push(items[idx]);
+    }
+    return out.filter((item, i, arr) => i === arr.findIndex((x) => x === item));
+  }
+
+  async function listMetaNotes(query = {}) {
+    const store = await loadNotesStore();
+    const scope = query.scope || 'all';
+    const q = String(query.q || '').trim().toLowerCase();
+    const cwd = query.cwd ? expandPath(query.cwd) : '';
+    const sessionId = String(query.sessionId || '').trim();
+    const agent = String(query.agent || '').trim();
+    const limit = Math.min(query.limit || 30, 200);
+    let rows = [...store.notes];
+    if (scope !== 'all') rows = rows.filter((n) => n.scope === scope);
+    if (cwd) rows = rows.filter((n) => n.cwd === cwd);
+    if (sessionId) rows = rows.filter((n) => n.sessionId === sessionId);
+    if (agent) rows = rows.filter((n) => n.agent === agent);
+    if (q) {
+      rows = rows.filter((n) => `${n.title || ''}\n${n.content || ''}\n${(n.tags || []).join(' ')}`.toLowerCase().includes(q));
+    }
+    rows.sort((a, b) => {
+      if (!!b.pinned !== !!a.pinned) return Number(b.pinned) - Number(a.pinned);
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+    return rows.slice(0, limit);
+  }
+
+  async function getMetaNote(id) {
+    if (!id) return null;
+    const store = await loadNotesStore();
+    return store.notes.find((n) => n.id === id) || null;
+  }
+
+  async function saveMetaNote(input = {}) {
+    const store = await loadNotesStore();
+    const now = Date.now();
+    const id = input.id ? String(input.id) : crypto.randomUUID();
+    const cwd = input.cwd ? expandPath(input.cwd) : '';
+    const sessionId = String(input.sessionId || '').trim();
+    const agent = String(input.agent || '').trim() || (sessionId ? 'claude' : '');
+    const scope = sessionId ? 'session' : cwd ? 'project' : 'general';
+    const tags = Array.isArray(input.tags)
+      ? [...new Set(input.tags.map((x) => String(x || '').trim()).filter(Boolean))].slice(0, 12)
+      : [];
+    const prev = store.notes.find((n) => n.id === id);
+    const note = {
+      id,
+      scope,
+      title: String(input.title || '').trim().slice(0, 200),
+      content: String(input.content || '').trim(),
+      cwd,
+      sessionId,
+      agent,
+      pinned: Boolean(input.pinned),
+      tags,
+      createdAt: prev?.createdAt || now,
+      updatedAt: now,
+    };
+    if (!note.title) throw new Error('title required');
+    if (!note.content) throw new Error('content required');
+    if (prev) {
+      const idx = store.notes.findIndex((n) => n.id === id);
+      store.notes[idx] = note;
+    } else {
+      store.notes.unshift(note);
+    }
+    await saveNotesStore();
+    return note;
+  }
+
+  async function deleteMetaNote(id) {
+    if (!id) return { ok: false };
+    const store = await loadNotesStore();
+    const next = store.notes.filter((n) => n.id !== id);
+    const changed = next.length !== store.notes.length;
+    store.notes = next;
+    if (changed) await saveNotesStore();
+    return { ok: changed };
+  }
+
+  async function getSessionMetaNote(sessionId, agent) {
+    if (!sessionId || !getSessionMetaStore) return null;
+    const db = await getSessionMetaStore();
+    const key = `${agent || 'claude'}:${sessionId}`;
+    return db?.[key] || null;
+  }
+
+  async function findSessionRecord(sessionId, preferredAgent = null) {
+    const sessions = await listSessions(null, preferredAgent || null);
+    let hit = sessions.find((s) => s.sessionId === sessionId && (!preferredAgent || s.agent === preferredAgent));
+    if (!hit && !preferredAgent) hit = sessions.find((s) => s.sessionId === sessionId);
+    return hit || null;
+  }
+
+  async function buildSessionBrief(args = {}) {
+    const sessionId = args.sessionId || args.id;
+    if (!sessionId) return { error: 'sessionId required' };
+    const maxTurns = Math.min(args.maxTurns || 6, 12);
+    const record = await findSessionRecord(sessionId, args.agent || null);
+    const resolvedAgent = record?.agent || args.agent || null;
+    const updatedAt = record?.updatedAt || 0;
+    const cacheKey = `${resolvedAgent || '*'}:${sessionId}`;
+    const cache = await loadSessionBriefsStore();
+    const cached = cache[cacheKey];
+    if (cached && cached.updatedAt === updatedAt && cached.maxTurns === maxTurns) return cached.brief;
+
+    const bundle = await loadSessionMessages(sessionId, resolvedAgent, sessionOpts());
+    if (!bundle) return { error: 'session not found' };
+    const msgs = Array.isArray(bundle) ? bundle : (bundle.messages || []);
+    const userTurns = [];
+    const assistantTurns = [];
+    for (const m of msgs) {
+      const role = m.role || m.type;
+      if (role !== 'user' && role !== 'assistant') continue;
+      const text = extractRoleText(m);
+      if (!text || text.startsWith('Caveat:') || text.startsWith('<command-')) continue;
+      const row = { role, text: shortTitle(text, role === 'user' ? 260 : 220) };
+      if (role === 'user') userTurns.push(row);
+      else assistantTurns.push(row);
+    }
+    const checkpoints = pickSample(userTurns, maxTurns).map((turn, idx) => ({
+      index: idx + 1,
+      prompt: turn.text,
+    }));
+    const cwd = record?.cwd || null;
+    const projectNotesStore = cwd ? await getProjectNotesStore() : null;
+    const projectNotes = cwd ? normalizeProjectEntry(projectNotesStore?.[cwd] || {}) : { goal: '', notes: '' };
+    const sessionMeta = await getSessionMetaNote(sessionId, resolvedAgent || 'claude');
+    const linkedNotes = await listMetaNotes({ scope: 'session', sessionId, agent: resolvedAgent || undefined, limit: 8 });
+    const brief = {
+      sessionId,
+      agent: Array.isArray(bundle) ? resolvedAgent : (bundle.agent || resolvedAgent),
+      cwd,
+      projectName: record?.projectName || (cwd ? path.basename(cwd) : ''),
+      title: shortTitle(record?.display || record?.title || sessionId, 120),
+      updatedAt,
+      totalMessages: msgs.length,
+      userTurnCount: userTurns.length,
+      assistantTurnCount: assistantTurns.length,
+      firstUserPrompt: userTurns[0]?.text || '',
+      latestUserPrompt: userTurns[userTurns.length - 1]?.text || '',
+      latestAssistantReply: assistantTurns[assistantTurns.length - 1]?.text || '',
+      checkpoints,
+      projectGoal: projectNotes.goal || '',
+      projectNotes: projectNotes.notes ? shortTitle(projectNotes.notes, 300) : '',
+      sessionNote: (sessionMeta?.notes || '').trim(),
+      linkedNotes: linkedNotes.map((n) => ({
+        id: n.id,
+        title: n.title,
+        content: shortTitle(n.content, 240),
+        updatedAt: n.updatedAt,
+      })),
+    };
+    cache[cacheKey] = { updatedAt, maxTurns, brief, cachedAt: Date.now() };
+    await saveSessionBriefsStore();
+    return brief;
   }
 
   function indexEntryFromSession(s) {
@@ -1459,6 +1744,9 @@ export function createMetaAgent(deps) {
           messages: summary,
         };
       }
+      case 'get_session_brief': {
+        return buildSessionBrief(args);
+      }
       case 'get_session_jsonl': {
         const sid = args.sessionId || args.id;
         if (!sid) return { error: 'sessionId required' };
@@ -1485,6 +1773,15 @@ export function createMetaAgent(deps) {
         store[cwd] = cur;
         await saveProjectNotesStore();
         return { ok: true, cwd, ...cur };
+      }
+      case 'list_meta_notes': {
+        return listMetaNotes(args);
+      }
+      case 'save_meta_note': {
+        return saveMetaNote(args);
+      }
+      case 'delete_meta_note': {
+        return deleteMetaNote(args.id);
       }
       case 'git_status': {
         const cwd = expandPath(args.cwd);
@@ -2004,6 +2301,11 @@ export function createMetaAgent(deps) {
         .slice(0, limit);
     },
     buildDigest,
+    listMetaNotes,
+    getMetaNote,
+    saveMetaNote,
+    deleteMetaNote,
+    buildSessionBrief,
     executeTool,
     runLoop,
     resolveApproval,

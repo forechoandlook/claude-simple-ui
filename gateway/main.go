@@ -865,6 +865,9 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/projects/notes":
 		g.handleProjectNotes(w, r)
 		return
+	case path == "/api/ai/notes" || strings.HasPrefix(path, "/api/ai/notes/"):
+		g.handleMetaNotes(w, r)
+		return
 	case strings.HasPrefix(path, "/api/"):
 		g.handleProxiedAPI(w, r)
 		return
