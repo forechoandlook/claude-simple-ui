@@ -1297,10 +1297,12 @@ html.pwa-standalone .ma-panel {
 /* Shell tab terminal — keep dark intentionally (terminal aesthetic) */
 #tab-shell { background: #0d1117; }
 #term-output { color: #c9d1d9; }
+#term-keyboard { display: none; }
 
 /* xterm parks its input off-screen, which is unreliable for mobile IMEs.
  * Phones use the visible native command composer below the terminal instead. */
 @media (max-width: 640px), (hover: none) and (pointer: coarse) {
+  #term-keyboard { display: inline-flex; }
   #term-mobile-keys { display: flex !important; }
   #term-mobile-composer { display: flex !important; }
   #terminal-container { touch-action: manipulation; }
