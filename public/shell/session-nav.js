@@ -10,6 +10,7 @@ import { getLastSessionContext, setLastSessionContext } from './session-context.
 import {
   connectWS, clearMessages, appendMsg, appendSystemMsg, renderToolUse,
   appendHistoryTokenBar, appendContextBar, flushToolBatch, coerceTs,
+  stashComposerDraft, restoreComposerDraft, discardComposerAttachments, parkQueuedMessages, detachProcessingForSessionSwitch,
 } from '../chat.js';
 import { setHash, syncHash } from '../router.js';
 import { refreshModelSelect } from './session-list.js';
@@ -34,6 +35,10 @@ function syncMachinePathHints(machineId) {
 }
 
 export function openProject(project) {
+  stashComposerDraft();
+  parkQueuedMessages();
+  discardComposerAttachments();
+  detachProcessingForSessionSwitch();
   const path = project?.path || '';
   batch(() => {
     currentProject.value = project;
@@ -56,11 +61,16 @@ export function openProject(project) {
   pv.classList.remove('hidden');
   pv.style.display = 'flex';
   clearMessages();
+  restoreComposerDraft({ sessionId: null });
   connectWS();
   switchTab('chat');
 }
 
 export function goHome() {
+  stashComposerDraft();
+  parkQueuedMessages();
+  discardComposerAttachments();
+  detachProcessingForSessionSwitch();
   currentProject.value = null;
   sessionFilter.value = null;
   filesRoot.value = '';
@@ -68,6 +78,7 @@ export function goHome() {
   filesPath.value = '';
   viewingFile.value = null;
   ctx.sessionId = null;
+  restoreComposerDraft({ sessionId: null });
   syncMachinePathHints(null);
 
   // Leaving session restore mode — calendar is allowed again
@@ -116,6 +127,12 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
   const resolvedCwd = cwd || fromList?.cwd || fromLast?.cwd || null;
   const resolvedConfig = configDir || fromList?.configDir || fromLast?.configDir || null;
 
+  // Capture before changing ctx, then restore only after the new identity is set.
+  stashComposerDraft();
+  parkQueuedMessages();
+  discardComposerAttachments();
+  detachProcessingForSessionSwitch();
+
   if (resolvedMachine && resolvedMachine !== ctx.machineId) {
     setSelectedMachine(resolvedMachine);
     try { ctx.ws?.close(); } catch {}
@@ -127,6 +144,7 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
   ctx.agent = resolvedAgent;
   setAgent(resolvedAgent);
   refreshModelSelect();
+  restoreComposerDraft({ sessionId: sid, agent: resolvedAgent, machineId: resolvedMachine });
 
   // Default path = session cwd on the target machine (set immediately; no await)
   let edgeCwd = resolvedCwd;

@@ -6,21 +6,25 @@
     top: calc(44px + env(safe-area-inset-top, 0px));
     left: 0;
     bottom: 0;
-    transform: translateX(-100%); z-index: 10;
-    transition: transform .2s ease;
+    width: min(86vw, 22rem) !important;
+    min-width: min(86vw, 22rem) !important;
+    max-width: min(86vw, 22rem) !important;
+    transform: translateX(-103%); z-index: 10;
+    transition: transform .22s cubic-bezier(.2,.8,.2,1), box-shadow .22s ease;
     padding-bottom: env(safe-area-inset-bottom, 0px);
+    overscroll-behavior: contain;
   }
   #sidebar.open { transform: translateX(0); box-shadow: 4px 0 20px rgba(0,0,0,.4); }
 
   /* Compact chat composer on phones — less height, less dead space under bar */
   #composer-row { padding: 0 !important; }
-  .composer-surface { min-height: 0; border-radius: 1.35rem; }
+  .composer-surface { min-height: 0; border-radius: 0.8rem; }
   #chat-input.chat-input,
   #chat-input {
     min-height: 32px !important;
     max-height: 72px !important;
     padding: 0 !important;
-    border-radius: 1.15rem 1.15rem 0 0;
+    border-radius: 0.65rem 0.65rem 0 0;
     /* 16px prevents iOS Safari auto-zoom on focus */
     font-size: 16px !important;
     line-height: 1.4 !important;
@@ -76,6 +80,25 @@
   #sidebar-toggle {
     display: none !important;
   }
+  #sidebar .input,
+  #sidebar .select {
+    min-height: 2.25rem;
+    font-size: 16px !important; /* prevents Safari focus zoom */
+  }
+  #sidebar #time-range { font-size: 12px !important; }
+  #sidebar #session-list {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+    -webkit-overflow-scrolling: touch;
+  }
+  #sidebar [data-view],
+  #sidebar .agent-pill {
+    min-height: 28px;
+  }
+  #sidebar .sidebar-mobile-actions {
+    display: flex;
+    gap: 0.35rem;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
+  }
   .md {
     font-size: 0.9375rem;
     line-height: 1.6;
@@ -98,6 +121,16 @@
     font-size: 10px;
     line-height: 1.45;
     padding: 0.15rem 0.45rem;
+  }
+}
+
+@media (min-width: 641px) {
+  #sidebar .sidebar-mobile-actions { display: none !important; }
+  #sidebar {
+    transition: width .18s ease, min-width .18s ease;
+  }
+  #sidebar.desktop-collapsed {
+    border-right-color: transparent;
   }
 }
 
@@ -962,7 +995,7 @@ html.pwa-standalone .ma-panel {
   flex-direction: column;
   overflow: hidden;
   border: 1px solid color-mix(in oklch, var(--color-base-content) 16%, transparent);
-  border-radius: 1.35rem;
+  border-radius: 0.875rem;
   background: color-mix(in oklch, var(--color-base-100) 78%, var(--color-base-200));
   box-shadow: 0 8px 24px color-mix(in oklch, black 12%, transparent), inset 0 1px 0 color-mix(in oklch, white 6%, transparent);
   transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
@@ -1064,7 +1097,7 @@ html.pwa-standalone .ma-panel {
   max-height: 72px;
   padding: 0;
   border: 0;
-  border-radius: 1.25rem 1.25rem 0 0;
+  border-radius: 0.75rem 0.75rem 0 0;
   background: transparent;
   color: var(--color-base-content);
   outline: none !important;

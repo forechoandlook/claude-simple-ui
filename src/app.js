@@ -1413,24 +1413,35 @@ export function createApp() {
         if (cmd.sessionId) options.sessionId = cmd.sessionId;
         if (cmd.cwd) options.cwd = cmd.cwd;
         if (options.sessionId) client.sessionId = options.sessionId;
-        const agentSend = createAgentSend(outbox, agent);
+        // A socket may subscribe to another session while this agent is still
+        // streaming. Keep this run's delivery target in its own closure rather
+        // than consulting mutable client.sessionId in the shared socket outbox.
+        let runSessionId = options.sessionId || client.sessionId || null;
+        const runOutbox = createOutbox((data) => {
+          broadcastChat(runSessionId, data, ws);
+        }, {
+          maxWait: 48,
+          maxDeltaChars: 720,
+          maxBatchItems: 10,
+          maxBatchBytes: 10_000,
+        });
+        const agentSend = createAgentSend(runOutbox, agent);
         const runSend = (data) => {
+          if (data?.sessionId) runSessionId = data.sessionId;
           if (data?.type === 'result' || data?.type === 'complete' || data?.type === 'error') {
-            markSessionIdle(data.sessionId || client.sessionId, options.sessionId);
-            outbox.flush();
+            markSessionIdle(data.sessionId || runSessionId, options.sessionId);
+            runOutbox.flush();
           }
-          if (data?.sessionId) client.sessionId = data.sessionId;
-          if (data?.type === 'session-created' && data.sessionId) client.sessionId = data.sessionId;
           // permission_request bypasses map filter double-pass carefully
           if (data?.type === 'permission_request' || data?.type === 'permission_resolved') {
-            outbox.send(data);
-            outbox.flush();
+            runOutbox.send(data);
+            runOutbox.flush();
             return;
           }
           agentSend(data);
         };
         await dispatchAgent(agent, cmd.command || '', options, runSend);
-        outbox.flush();
+        runOutbox.flush();
         return;
       }
 

@@ -226,10 +226,33 @@ export function showSelectedDaySessions(sessions) {
 
 /** How many sessions in the topbar “最近” quick-jump menu. */
 export const RECENT_MENU_LIMIT = 15;
+const RECENT_DISMISSED_KEY = 'recentSessionsDismissed';
+
+function recentDismissKey(s) {
+  return `${s.machineId || ''}:${s.agent || 'claude'}:${s.sessionId}`;
+}
+
+function dismissedRecentKeys() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RECENT_DISMISSED_KEY) || '[]');
+    return new Set(Array.isArray(saved) ? saved : []);
+  } catch { return new Set(); }
+}
+
+/** Remove an item from this device's quick-jump list; the actual session remains intact. */
+export function dismissRecentSession(session) {
+  if (!session?.sessionId) return;
+  const keys = dismissedRecentKeys();
+  keys.add(recentDismissKey(session));
+  // Keep storage bounded even after many one-off sessions.
+  localStorage.setItem(RECENT_DISMISSED_KEY, JSON.stringify([...keys].slice(-200)));
+  renderRecentSessionsMenu(getDashboardSessions());
+}
 
 function sortRecentSessions(sessions, limit) {
+  const dismissed = dismissedRecentKeys();
   return [...asSessionArray(sessions)]
-    .filter(s => s && s.sessionId)
+    .filter(s => s && s.sessionId && !dismissed.has(recentDismissKey(s)))
     .sort((a, b) => (coerceTs(b.updatedAt) || 0) - (coerceTs(a.updatedAt) || 0))
     .slice(0, limit);
 }
@@ -357,14 +380,14 @@ export function renderRecentSessionsMenu(sessions) {
       ? `<span class="text-[9px] font-mono text-base-content/35 truncate max-w-[4.5rem]" title="${esc(s.machineId)}">@${esc(s.machineId)}</span>`
       : '';
     return `
-      <button type="button"
-        class="recent-menu-item w-full text-left px-2 py-1.5 rounded-md flex items-start gap-2
-               ${active ? 'bg-primary/15 text-primary' : 'hover:bg-base-200'}"
-        data-session-id="${esc(s.sessionId)}"
-        data-session-cwd="${esc(s.cwd || '')}"
-        data-session-config-dir="${esc(s.configDir || '')}"
-        data-session-agent="${esc(s.agent || 'claude')}"
-        data-session-machine="${esc(s.machineId || '')}">
+      <div class="recent-menu-item w-full text-left px-2 py-1.5 rounded-md flex items-start gap-2
+               ${active ? 'bg-primary/15 text-primary' : 'hover:bg-base-200'}">
+        <button type="button" class="flex min-w-0 flex-1 items-start gap-2 text-left" aria-label="打开 ${esc(sessionDisplayTitle(s))}"
+          data-session-id="${esc(s.sessionId)}"
+          data-session-cwd="${esc(s.cwd || '')}"
+          data-session-config-dir="${esc(s.configDir || '')}"
+          data-session-agent="${esc(s.agent || 'claude')}"
+          data-session-machine="${esc(s.machineId || '')}">
         <span class="flex-shrink-0 mt-0.5">${agentBadge(s.agent)}</span>
         <span class="flex-1 min-w-0">
           <span class="block text-xs font-semibold truncate leading-snug">${esc(sessionDisplayTitle(s))}</span>
@@ -375,7 +398,13 @@ export function renderRecentSessionsMenu(sessions) {
           ${machine}
           ${active ? '<span class="text-[9px] opacity-70">当前</span>' : ''}
         </span>
-      </button>`;
+        </button>
+        <button type="button" class="recent-remove btn btn-ghost btn-xs min-h-7 h-7 w-7 px-0 flex-shrink-0 text-base-content/45 hover:text-error"
+          title="从最近会话移除" aria-label="从最近会话移除 ${esc(sessionDisplayTitle(s))}"
+          data-dismiss-recent-session="${esc(s.sessionId)}"
+          data-dismiss-recent-agent="${esc(s.agent || 'claude')}"
+          data-dismiss-recent-machine="${esc(s.machineId || '')}">×</button>
+      </div>`;
   }).join('');
 }
 

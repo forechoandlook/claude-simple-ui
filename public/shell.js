@@ -28,6 +28,7 @@ import { AuthScreen, AppShell } from './shell/templates.js';
 import {
   updateDashboard, shiftCalMonth, setSelectedCalDate, getDashboardSessions,
   openRecentMenu, toggleRecentMenu, closeRecentMenu, positionRecentMenu,
+  dismissRecentSession,
 } from './shell/dashboard.js';
 import {
   loadAllSessions, loadWorkspaces, renderSessionList, syncSidebarChrome,
@@ -336,6 +337,13 @@ export function initShell(opts = {}) {
   delegate.on('keydown', '#auth-username, #auth-password', e => { if (e.key === 'Enter') submitAuth(); });
   delegate.on('click', '#hamburger', () => $('sidebar').classList.contains('open') ? closeSidebar() : openSidebar());
   delegate.on('click', '#sidebar-overlay', closeSidebar);
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (window.innerWidth <= 640 && $('sidebar')?.classList.contains('open')) {
+      e.preventDefault();
+      closeSidebar();
+    }
+  });
 
   delegate.on('input', '#session-search', (_, el) => {
     sessionSearch.value = el.value;
@@ -383,6 +391,19 @@ export function initShell(opts = {}) {
   delegate.on('click', '#btn-meta-agent', () => toggleMetaAgent());
   delegate.on('click', '#btn-meta-agent-welcome', () => openMetaAgent('chat'));
   delegate.on('click', '#btn-theme', toggleTheme);
+  delegate.on('click', '[data-sidebar-action]', (_, el) => {
+    const action = el.dataset.sidebarAction;
+    if (action === 'new') openNewSessionModal();
+    if (action === 'theme') toggleTheme();
+    if (action === 'settings') openSettings();
+    if (action === 'logout') {
+      ctx.token = null;
+      localStorage.removeItem('token');
+      setSelectedMachine(null);
+      hubMachineReady.value = false;
+      location.reload();
+    }
+  });
 
   delegate.on('click', '#btn-cal-prev', () => {
     shiftCalMonth(-1);
@@ -638,6 +659,15 @@ export function initShell(opts = {}) {
   delegate.on('click', '#recent-menu [data-session-id]', () => {
     closeRecentMenu();
     $('btn-recent-sessions')?.setAttribute('aria-expanded', 'false');
+  });
+  delegate.on('click', '[data-dismiss-recent-session]', (e, el) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dismissRecentSession({
+      sessionId: el.dataset.dismissRecentSession,
+      agent: el.dataset.dismissRecentAgent || 'claude',
+      machineId: el.dataset.dismissRecentMachine || null,
+    });
   });
 
   delegate.on('click', '#btn-edit-project-notes, #project-goal-text, #project-notes-text', () => {

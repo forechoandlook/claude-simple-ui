@@ -39,10 +39,10 @@ export const AppShell = (opts = {}) => {
     : 'hidden flex-col flex-1 overflow-hidden min-h-0';
   const projectStyle = restore ? 'display:flex;flex-direction:column;flex:1;min-height:0' : '';
   return `
-  <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-[9]"></div>
+  <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-[9]" aria-hidden="true"></div>
   <div id="app" class="${appHidden} flex-col flex-1 overflow-hidden" style="${appStyle}">
     <div id="topbar" class="flex items-center gap-2 px-3 bg-base-200 border-b border-base-300 flex-shrink-0" style="height:44px">
-      <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg">☰</button>
+      <button id="hamburger" class="btn btn-ghost btn-sm px-2 text-lg" aria-label="打开项目与会话侧栏" aria-controls="sidebar" aria-expanded="false">☰</button>
       <span id="btn-home" class="font-semibold text-sm hidden sm:inline cursor-pointer hover:text-primary transition-colors select-none">🤖 Agent UI</span>
       <span class="text-base-300 hidden sm:inline">/</span>
       <div id="machine-menu-wrap" class="relative hidden flex-shrink-0">
@@ -107,7 +107,7 @@ export const AppShell = (opts = {}) => {
       </div>
     </div>
     <div class="flex flex-1 overflow-hidden relative">
-      <div id="sidebar" class="bg-base-200 border-r border-base-300 flex flex-col flex-shrink-0 overflow-hidden" style="width:280px;min-width:180px;max-width:520px">
+      <aside id="sidebar" class="bg-base-200 border-r border-base-300 flex flex-col flex-shrink-0 overflow-hidden" style="width:280px;min-width:180px;max-width:520px" aria-label="项目与会话" tabindex="-1">
         <div class="flex items-center justify-between px-3 py-2 border-b border-base-300 flex-shrink-0">
           <span class="text-xs uppercase tracking-wider text-base-content/50 font-medium">Projects</span>
           <div class="flex items-center gap-1">
@@ -143,10 +143,16 @@ export const AppShell = (opts = {}) => {
           <div id="search-status" class="hidden text-[10px] text-base-content/40 px-0.5"></div>
         </div>
         <div id="session-list" class="overflow-y-auto flex-1"></div>
-      </div>
+        <div class="sidebar-mobile-actions hidden border-t border-base-300 px-2 py-2 flex-shrink-0">
+          <button type="button" class="btn btn-primary btn-sm flex-1" data-sidebar-action="new">＋ 新会话</button>
+          <button type="button" class="btn btn-ghost btn-sm px-2" data-sidebar-action="theme" aria-label="切换深色或浅色主题">🌙</button>
+          <button type="button" class="btn btn-ghost btn-sm px-2" data-sidebar-action="settings" aria-label="设置">⚙️</button>
+          <button type="button" class="btn btn-ghost btn-sm px-2 text-error" data-sidebar-action="logout" aria-label="退出登录">⇥</button>
+        </div>
+      </aside>
       <div class="flex flex-col flex-shrink-0 relative" style="width:12px">
         <div id="sidebar-resize" class="absolute inset-0 bg-transparent hover:bg-primary/30 transition-colors cursor-col-resize"></div>
-        <button id="sidebar-toggle" title="Toggle sidebar"
+        <button id="sidebar-toggle" title="收起侧栏" aria-label="收起侧栏" aria-controls="sidebar" aria-expanded="true"
           class="absolute z-10 flex items-center justify-center w-5 h-8 bg-base-200 border border-base-300 rounded-r-md text-[10px] text-base-content/40 hover:text-base-content cursor-pointer"
           style="left:0;top:50%;transform:translateY(-50%)">◀</button>
       </div>

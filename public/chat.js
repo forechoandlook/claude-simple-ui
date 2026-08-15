@@ -32,8 +32,57 @@ let lifecycleBound = false;
 let sawDisconnect = false;
 let lastWsMachine = null;
 let reconnectQuiet = false;
-/** Queued user text to send after current turn finishes (Grok used to block forever). */
-let pendingUserText = null;
+/** FIFO messages deliberately queued while a turn is running. */
+let pendingUserTexts = [];
+// Composer state belongs to a conversation, never to the shared textarea.
+// Keeping this in memory deliberately avoids persisting potentially sensitive
+// prompts to disk while still making session switches lossless.
+const composerDrafts = new Map();
+
+function draftKey({ sessionId = ctx.sessionId, agent = ctx.agent, machineId = ctx.machineId } = {}) {
+  if (!sessionId) return null;
+  return `${machineId || ''}:${agent || 'claude'}:${sessionId}`;
+}
+
+/** Save the visible, unsent prompt under its current session identity. */
+export function stashComposerDraft(identity) {
+  const key = draftKey(identity);
+  const input = $('chat-input');
+  if (!key || !input) return;
+  if (input.value) composerDrafts.set(key, input.value);
+  else composerDrafts.delete(key);
+}
+
+/** Restore only the target session's draft; a missing one must mean blank. */
+export function restoreComposerDraft(identity) {
+  const input = $('chat-input');
+  if (!input) return;
+  input.value = composerDrafts.get(draftKey(identity)) || '';
+  autoResize(input);
+  updateInputMode(input.value);
+}
+
+/**
+ * Leaving a session turns its queued sends back into a visible draft. This is
+ * intentionally conservative: a background completion must never send work
+ * into whichever session the user is viewing now.
+ */
+export function parkQueuedMessages(identity) {
+  const key = draftKey(identity);
+  if (!key) return;
+  const queued = pendingUserTexts.filter(item => item.key === key);
+  if (!queued.length) return;
+  pendingUserTexts = pendingUserTexts.filter(item => item.key !== key);
+  const existing = composerDrafts.get(key) || '';
+  composerDrafts.set(key, [existing, ...queued.map(item => item.text)].filter(Boolean).join('\n\n'));
+}
+
+/** A run may continue server-side after navigation, but it is no longer active UI state. */
+export function detachProcessingForSessionSwitch() {
+  if (!isProcessing.peek()) return;
+  isProcessing.value = false;
+  syncWakeLock();
+}
 
 function bindSocketLifecycle() {
   if (lifecycleBound) return;
@@ -238,16 +287,27 @@ export function connectWS(opts = {}) {
 }
 
 function flushPendingUserText() {
-  if (!pendingUserText || isProcessing.peek()) return;
-  const text = pendingUserText;
-  pendingUserText = null;
+  if (!pendingUserTexts.length || isProcessing.peek()) return;
+  const currentKey = draftKey();
+  const index = pendingUserTexts.findIndex(item => item.key === currentKey);
+  // Queues belonging to another session stay parked until that session is
+  // opened (or are converted to a draft during navigation).
+  if (index < 0) return;
+  const [pending] = pendingUserTexts.splice(index, 1);
   const input = $('chat-input');
   if (input) {
-    input.value = text;
+    input.value = pending.text;
     autoResize(input);
   }
-  // Defer so isProcessing watch can re-enable send button first
-  setTimeout(() => sendMessage(), 0);
+  // Defer so isProcessing watch can re-enable send button first. Re-check the
+  // identity inside the callback: a click can switch sessions in this tiny gap.
+  setTimeout(() => {
+    if (pending.key !== draftKey() || isProcessing.peek()) {
+      composerDrafts.set(pending.key, pending.text);
+      return;
+    }
+    sendMessage();
+  }, 0);
 }
 
 function markTurnDone() {
@@ -257,6 +317,10 @@ function markTurnDone() {
 }
 
 function handleWsMessage(msg) {
+  // The socket can still receive a final frame from the previously viewed
+  // session while its subscription is changing. Do not let that frame alter
+  // the new session's transcript, processing state, or queue.
+  if (msg?.sessionId && ctx.sessionId && msg.sessionId !== ctx.sessionId) return;
   // Server outbox may pack multiple events into one frame
   if (msg.type === 'batch' && Array.isArray(msg.items)) {
     for (const item of msg.items) handleWsMessage(item);
@@ -702,7 +766,7 @@ export function sendMessage() {
 
   // While a turn is running, queue the next message (common Grok complaint).
   if (isProcessing.peek()) {
-    pendingUserText = text;
+    pendingUserTexts.push({ key: draftKey(), text });
     input.value = '';
     autoResize(input);
     updateInputMode('');
@@ -712,6 +776,7 @@ export function sendMessage() {
   }
 
   input.value = '';
+  composerDrafts.delete(draftKey());
   autoResize(input);
   updateInputMode('');
   clearPendingAttachments();
@@ -766,7 +831,7 @@ export function stopProcessing() {
   if (ctx.sessionId) {
     sendWs({ type: 'command', cmd: 'turn.interrupt', sessionId: ctx.sessionId });
   }
-  pendingUserText = null;
+  pendingUserTexts = pendingUserTexts.filter(item => item.key !== draftKey());
   markTurnDone();
 }
 
@@ -1017,6 +1082,11 @@ function clearPendingAttachments() {
   }
   pendingAttachments.length = 0;
   renderAttachBar();
+}
+
+/** Attachments are bound to the visible composer; discard them before session navigation. */
+export function discardComposerAttachments() {
+  clearPendingAttachments();
 }
 
 function renderAttachBar() {

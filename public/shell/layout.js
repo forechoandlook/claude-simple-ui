@@ -8,7 +8,7 @@ import {
 } from '../state.js';
 // filesRoot/gitRoot used when starting a new session (default paths)
 import { api } from '../api.js';
-import { connectWS, clearMessages, appendSystemMsg, applyChatDensity } from '../chat.js';
+import { connectWS, clearMessages, appendSystemMsg, applyChatDensity, stashComposerDraft, restoreComposerDraft, discardComposerAttachments, parkQueuedMessages, detachProcessingForSessionSwitch } from '../chat.js';
 import { refreshModelSelect } from './session-list.js';
 import { switchTab } from './session-nav.js';
 import { showMachinePicker } from './hub.js';
@@ -16,27 +16,37 @@ import { syncFocusScope } from '../mobile.js';
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 export function openSidebar()  {
-  $('sidebar').classList.add('open');
+  const sidebar = $('sidebar');
+  if (!sidebar) return;
+  sidebar.classList.add('open');
   $('sidebar-overlay').classList.remove('hidden');
+  $('hamburger')?.setAttribute('aria-expanded', 'true');
   syncFocusScope();
+  // Put the next action where it belongs. Delaying lets the drawer transition
+  // start first, which is more reliable in mobile Safari.
+  setTimeout(() => $('session-search')?.focus({ preventScroll: true }), 180);
 }
 export function closeSidebar() {
-  $('sidebar').classList.remove('open');
+  const sidebar = $('sidebar');
+  if (!sidebar) return;
+  sidebar.classList.remove('open');
   $('sidebar-overlay').classList.add('hidden');
+  $('hamburger')?.setAttribute('aria-expanded', 'false');
   syncFocusScope();
+  $('hamburger')?.focus({ preventScroll: true });
 }
 export function closeSidebarOnMobile() { if (window.innerWidth <= 640) closeSidebar(); }
 
 export function initSidebarToggle() {
   const btn     = $('sidebar-toggle');
   const sidebar = $('sidebar');
-  let collapsed = false;
-  let savedWidth = sidebar.style.width || '260px';
+  if (!btn || !sidebar) return;
+  let collapsed = localStorage.getItem('sidebarCollapsed') === '1';
+  let savedWidth = localStorage.getItem('sidebarWidth') || sidebar.style.width || '280px';
 
-  btn.addEventListener('click', () => {
-    collapsed = !collapsed;
+  const applyCollapsed = () => {
+    sidebar.classList.toggle('desktop-collapsed', collapsed);
     if (collapsed) {
-      savedWidth = sidebar.style.width || '260px';
       sidebar.style.width = '0';
       sidebar.style.minWidth = '0';
       sidebar.style.overflow = 'hidden';
@@ -46,6 +56,17 @@ export function initSidebarToggle() {
       sidebar.style.overflow = '';
     }
     btn.textContent = collapsed ? '▶' : '◀';
+    btn.title = collapsed ? '展开侧栏' : '收起侧栏';
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  };
+  applyCollapsed();
+
+  btn.addEventListener('click', () => {
+    collapsed = !collapsed;
+    if (collapsed) savedWidth = sidebar.style.width || savedWidth;
+    localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
+    applyCollapsed();
   });
 }
 
@@ -71,6 +92,8 @@ export function initSidebarResize() {
     dragging = false;
     document.body.style.userSelect = '';
     document.body.style.cursor = '';
+    const width = Math.round(sidebar.getBoundingClientRect().width);
+    if (width >= 160) localStorage.setItem('sidebarWidth', `${width}px`);
   });
 }
 
@@ -79,7 +102,9 @@ export function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('theme', theme);
   const btn = $('btn-theme');
-  if (btn) btn.textContent = theme === 'dark' || theme === 'night' || theme === 'black' ? '🌙' : '☀️';
+  const icon = theme === 'dark' || theme === 'night' || theme === 'black' ? '🌙' : '☀️';
+  if (btn) btn.textContent = icon;
+  document.querySelectorAll('[data-sidebar-action="theme"]').forEach(el => { el.textContent = icon; });
   // Swap highlight.js stylesheet for light/dark
   let link = document.getElementById('hljs-theme');
   if (!link) {
@@ -171,6 +196,10 @@ export async function startNewSession() {
     $('modal-new-session').close();
 
     const name = result.path.split('/').filter(Boolean).pop() || result.path;
+    stashComposerDraft();
+    parkQueuedMessages();
+    discardComposerAttachments();
+    detachProcessingForSessionSwitch();
     ctx.sessionId = null;
     ctx.configDir = configDir || null;
     ctx.agent = agent;
@@ -194,6 +223,7 @@ export async function startNewSession() {
     pv.classList.remove('hidden');
     pv.style.display = 'flex';
     clearMessages();
+    restoreComposerDraft({ sessionId: null });
     connectWS();
     switchTab('chat');
     appendSystemMsg(`New ${AGENT_LABELS[agent] || agent} session · ${result.path}`);
