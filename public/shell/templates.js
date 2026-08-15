@@ -345,6 +345,10 @@ export const AppShell = (opts = {}) => {
               <button class="term-key" type="button" data-term-key="right">→</button>
             </div>
             <div id="terminal-container" class="flex-1 p-2 overflow-hidden"></div>
+            <form id="term-mobile-composer" class="hidden items-center gap-2 px-2 py-2 border-t border-slate-700 bg-[#161b22] flex-shrink-0">
+              <input id="term-mobile-input" class="term-mobile-input" type="text" placeholder="输入命令…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="send" aria-label="Terminal command">
+              <button class="term-mobile-send" type="submit">发送</button>
+            </form>
           </div>
           <div id="tab-git" class="hidden flex-col flex-1 overflow-hidden">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 flex-shrink-0 bg-base-200">

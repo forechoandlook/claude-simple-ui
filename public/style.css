@@ -1298,22 +1298,12 @@ html.pwa-standalone .ma-panel {
 #tab-shell { background: #0d1117; }
 #term-output { color: #c9d1d9; }
 
-/* xterm intentionally parks its input at -9999em and gives it no size. That
- * works on desktop, but Safari and several Android WebViews then reject the
- * focus request and silently leave the software keyboard closed. Keep it in
- * the terminal's hit area on touch devices while remaining visually invisible. */
-@media (max-width: 640px) {
+/* xterm parks its input off-screen, which is unreliable for mobile IMEs.
+ * Phones use the visible native command composer below the terminal instead. */
+@media (max-width: 640px), (hover: none) and (pointer: coarse) {
   #term-mobile-keys { display: flex !important; }
+  #term-mobile-composer { display: flex !important; }
   #terminal-container { touch-action: manipulation; }
-  #terminal-container .xterm-helper-textarea {
-    left: 0 !important;
-    top: 0 !important;
-    width: 1px !important;
-    height: 1px !important;
-    opacity: 0.01 !important;
-    z-index: 6 !important;
-    font-size: 16px !important; /* prevent iOS focus zoom */
-  }
   .term-key {
     min-width: 38px;
     min-height: 32px;
@@ -1326,6 +1316,30 @@ html.pwa-standalone .ma-panel {
     -webkit-tap-highlight-color: transparent;
   }
   .term-key:active { background: #30363d; }
+  .term-mobile-input {
+    flex: 1;
+    min-width: 0;
+    height: 38px;
+    padding: 0 10px;
+    border: 1px solid #30363d;
+    border-radius: 7px;
+    color: #f0f6fc;
+    background: #0d1117;
+    font: 16px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+    outline: none;
+  }
+  .term-mobile-input:focus { border-color: #58a6ff; }
+  .term-mobile-send {
+    height: 38px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 7px;
+    color: #fff;
+    background: #1f6feb;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .term-mobile-send:active { background: #388bfd; }
 }
 
 /* ── Meta Agent panel (DaisyUI 5: use --color-* full values, solid surfaces) ── */

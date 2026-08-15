@@ -23,10 +23,17 @@ function sendInput(data) {
   }
 }
 
-/** xterm's normal focus target is deliberately invisible. Mobile Safari will
- * often decline to show the keyboard for that element unless focus originates
- * from an explicit tap, so keep one reliable, user-visible focus path. */
+function isMobileShell() {
+  return window.matchMedia('(max-width: 640px), (hover: none) and (pointer: coarse)').matches;
+}
+
+/** Mobile IMEs do not reliably drive xterm's off-screen textarea. Use a real
+ * input there so composition, prediction and paste remain visible and intact. */
 function focusTerminal() {
+  if (isMobileShell()) {
+    document.getElementById('term-mobile-input')?.focus({ preventScroll: true });
+    return;
+  }
   term?.focus();
   const input = document.querySelector('#terminal-container .xterm-helper-textarea');
   if (input) {
@@ -86,8 +93,8 @@ function initXterm() {
     sendInput(data);
   });
 
-  // Do not rely on xterm's canvas click handling for mobile focus. This is a
-  // direct user gesture, which is required by iOS to open the software keyboard.
+  // On phones this focuses the native command input; desktop keeps xterm's
+  // direct keyboard interaction.
   container.addEventListener('pointerdown', () => focusTerminal(), { passive: true });
   container.addEventListener('touchend', () => focusTerminal(), { passive: true });
 
@@ -224,8 +231,16 @@ export function initTerminal() {
   if (!terminalEventsBound) {
     terminalEventsBound = true;
     document.getElementById('term-keyboard')?.addEventListener('click', focusTerminal);
+    document.getElementById('term-mobile-composer')?.addEventListener('submit', event => {
+      event.preventDefault();
+      const input = document.getElementById('term-mobile-input');
+      if (!input) return;
+      sendInput(`${input.value}\r`);
+      input.value = '';
+      input.focus({ preventScroll: true });
+    });
     document.getElementById('term-mobile-keys')?.addEventListener('pointerdown', event => {
-      // Keep the terminal textarea focused while using the touch shortcut row.
+      // Keep the native command input focused while using the touch shortcut row.
       if (event.target.closest('[data-term-key]')) event.preventDefault();
     });
     document.getElementById('term-mobile-keys')?.addEventListener('click', event => {
