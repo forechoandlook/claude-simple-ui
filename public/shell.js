@@ -625,7 +625,7 @@ export function initShell(opts = {}) {
     e.preventDefault();
     e.stopPropagation();
     closeMachineMenu();
-    toggleRecentMenu(getDashboardSessions());
+    toggleRecentMenu();
     const open = !$('recent-menu')?.classList.contains('hidden');
     const btn = $('btn-recent-sessions');
     if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');

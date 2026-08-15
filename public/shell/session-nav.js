@@ -15,7 +15,7 @@ import {
 import { setHash, syncHash } from '../router.js';
 import { refreshModelSelect } from './session-list.js';
 import { renderSessionNotesBar } from './notes.js';
-import { updateDashboard, getDashboardSessions } from './dashboard.js';
+import { addRecentSession, updateDashboard, getDashboardSessions } from './dashboard.js';
 
 /** Show which edge machine Files/Git/Shell paths belong to. */
 function syncMachinePathHints(machineId) {
@@ -137,6 +137,10 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
     setSelectedMachine(resolvedMachine);
     try { ctx.ws?.close(); } catch {}
     ctx.ws = null;
+    // A recent entry can belong to another edge.  Route the session request
+    // immediately, then refresh the surrounding machine UI in the background.
+    import('./hub.js').then(({ syncTopbarMachine }) => syncTopbarMachine()).catch(() => {});
+    import('./session-list.js').then(({ loadAllSessions }) => loadAllSessions()).catch(() => {});
   }
 
   ctx.sessionId = sid;
@@ -178,6 +182,19 @@ export async function resumeSession(sid, cwd, configDir, agent, machineId, opts 
     agent: resolvedAgent,
     machineId: resolvedMachine,
     tab: targetTab,
+  });
+  // Recent is a deliberate browsing history, not an automatic list of every
+  // session on the currently selected machine.  Keep the target machine in
+  // the entry so a later click can route back to the right edge.
+  addRecentSession({
+    sessionId: sid,
+    cwd: edgeCwd || resolvedCwd,
+    configDir: resolvedConfig,
+    agent: resolvedAgent,
+    machineId: resolvedMachine,
+    display: fromList?.display || fromLast?.display || '',
+    projectName: fromList?.projectName || fromLast?.projectName || '',
+    updatedAt: fromList?.updatedAt || fromLast?.updatedAt || null,
   });
 
   const label = AGENT_LABELS[resolvedAgent] || resolvedAgent;

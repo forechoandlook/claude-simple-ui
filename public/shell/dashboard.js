@@ -176,7 +176,7 @@ export function updateDashboard(sessions) {
   }).join('');
 
   showSelectedDaySessions(sessions);
-  updateRecentSessionsList(sessions);
+  updateRecentSessionsList();
 }
 
 export function showSelectedDaySessions(sessions) {
@@ -226,42 +226,62 @@ export function showSelectedDaySessions(sessions) {
 
 /** How many sessions in the topbar “最近” quick-jump menu. */
 export const RECENT_MENU_LIMIT = 15;
-const RECENT_DISMISSED_KEY = 'recentSessionsDismissed';
+const RECENT_SESSIONS_KEY = 'recentSessionsV1';
 
-function recentDismissKey(s) {
+function recentSessionKey(s) {
   return `${s.machineId || ''}:${s.agent || 'claude'}:${s.sessionId}`;
 }
 
-function dismissedRecentKeys() {
+/**
+ * The quick-jump list is deliberately opt-in: it starts empty and is populated
+ * only after a session is opened.  Unlike sessionsData, this survives machine
+ * switches and contains sessions from every edge machine.
+ */
+export function getRecentSessions() {
   try {
-    const saved = JSON.parse(localStorage.getItem(RECENT_DISMISSED_KEY) || '[]');
-    return new Set(Array.isArray(saved) ? saved : []);
-  } catch { return new Set(); }
+    const saved = JSON.parse(localStorage.getItem(RECENT_SESSIONS_KEY) || '[]');
+    return Array.isArray(saved)
+      ? saved.filter(s => s && s.sessionId)
+      : [];
+  } catch { return []; }
+}
+
+function saveRecentSessions(sessions) {
+  try { localStorage.setItem(RECENT_SESSIONS_KEY, JSON.stringify(sessions)); } catch { /* quota/private mode */ }
+}
+
+/** Add an explicitly opened session to the cross-machine quick-jump list. */
+export function addRecentSession(session) {
+  if (!session?.sessionId) return;
+  const key = recentSessionKey(session);
+  const entry = { ...session, lastOpenedAt: Date.now() };
+  const recent = getRecentSessions().filter(s => recentSessionKey(s) !== key);
+  recent.unshift(entry);
+  saveRecentSessions(recent.slice(0, RECENT_MENU_LIMIT));
+  updateRecentSessionsList();
+  renderRecentSessionsMenu();
 }
 
 /** Remove an item from this device's quick-jump list; the actual session remains intact. */
 export function dismissRecentSession(session) {
   if (!session?.sessionId) return;
-  const keys = dismissedRecentKeys();
-  keys.add(recentDismissKey(session));
-  // Keep storage bounded even after many one-off sessions.
-  localStorage.setItem(RECENT_DISMISSED_KEY, JSON.stringify([...keys].slice(-200)));
-  renderRecentSessionsMenu(getDashboardSessions());
+  const key = recentSessionKey(session);
+  saveRecentSessions(getRecentSessions().filter(s => recentSessionKey(s) !== key));
+  updateRecentSessionsList();
+  renderRecentSessionsMenu();
 }
 
-function sortRecentSessions(sessions, limit) {
-  const dismissed = dismissedRecentKeys();
-  return [...asSessionArray(sessions)]
-    .filter(s => s && s.sessionId && !dismissed.has(recentDismissKey(s)))
-    .sort((a, b) => (coerceTs(b.updatedAt) || 0) - (coerceTs(a.updatedAt) || 0))
+function sortRecentSessions(limit) {
+  return getRecentSessions()
+    .sort((a, b) => (coerceTs(b.lastOpenedAt) || 0) - (coerceTs(a.lastOpenedAt) || 0))
     .slice(0, limit);
 }
 
-export function updateRecentSessionsList(sessions) {
+export function updateRecentSessionsList() {
   const container = $('recent-sessions-list');
   if (!container) return;
 
-  const recent = sortRecentSessions(sessions, 6);
+  const recent = sortRecentSessions(6);
 
   if (!recent.length) {
     container.innerHTML = `<div class="col-span-full text-center text-xs text-base-content/40 py-4">No recent sessions</div>`;
@@ -338,31 +358,31 @@ export function positionRecentMenu() {
   menu.style.maxHeight = `${Math.min(maxH, Math.round(window.innerHeight * 0.7))}px`;
 }
 
-export function openRecentMenu(sessions) {
+export function openRecentMenu() {
   const menu = $('recent-menu');
   if (!menu) return;
-  renderRecentSessionsMenu(sessions ?? getDashboardSessions());
+  renderRecentSessionsMenu();
   menu.classList.remove('hidden');
   menu.classList.add('recent-menu-open');
   positionRecentMenu();
   $('recent-menu-backdrop')?.classList.remove('hidden');
 }
 
-export function toggleRecentMenu(sessions) {
+export function toggleRecentMenu() {
   const menu = $('recent-menu');
   if (!menu) return;
-  if (menu.classList.contains('hidden')) openRecentMenu(sessions);
+  if (menu.classList.contains('hidden')) openRecentMenu();
   else closeRecentMenu();
 }
 
-/** Topbar quick-jump: last N sessions by updatedAt. */
-export function renderRecentSessionsMenu(sessions) {
+/** Topbar quick-jump: the last N sessions explicitly opened by this user. */
+export function renderRecentSessionsMenu() {
   const listEl = $('recent-menu-list');
   const emptyEl = $('recent-menu-empty');
   const countEl = $('recent-menu-count');
   if (!listEl) return;
 
-  const recent = sortRecentSessions(sessions ?? getDashboardSessions(), RECENT_MENU_LIMIT);
+  const recent = sortRecentSessions(RECENT_MENU_LIMIT);
   if (countEl) countEl.textContent = recent.length ? `${recent.length}` : '';
 
   if (!recent.length) {
