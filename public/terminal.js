@@ -11,6 +11,30 @@ let lastMachine = null;
 let shellGen = 0;
 let shellReconnectTimer = null;
 let shellWanted = false;
+let terminalEventsBound = false;
+const mobileKeyData = {
+  'ctrl-c': '\x03', escape: '\x1b', tab: '\t',
+  up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C'
+};
+
+function sendInput(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'input', data }));
+  }
+}
+
+/** xterm's normal focus target is deliberately invisible. Mobile Safari will
+ * often decline to show the keyboard for that element unless focus originates
+ * from an explicit tap, so keep one reliable, user-visible focus path. */
+function focusTerminal() {
+  term?.focus();
+  const input = document.querySelector('#terminal-container .xterm-helper-textarea');
+  if (input) {
+    input.focus({ preventScroll: true });
+    // iOS may ignore the first focus while its visual viewport is settling.
+    requestAnimationFrame(() => input.focus({ preventScroll: true }));
+  }
+}
 
 function initXterm() {
   if (term) return;
@@ -59,15 +83,35 @@ function initXterm() {
   fitTerminal();
 
   term.onData(data => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data }));
-    }
+    sendInput(data);
   });
+
+  // Do not rely on xterm's canvas click handling for mobile focus. This is a
+  // direct user gesture, which is required by iOS to open the software keyboard.
+  container.addEventListener('pointerdown', () => focusTerminal(), { passive: true });
+  container.addEventListener('touchend', () => focusTerminal(), { passive: true });
 
   window.addEventListener('resize', () => {
     fitTerminal();
     sendResize();
   });
+
+  const vv = window.visualViewport;
+  if (vv) {
+    let raf = 0;
+    const fitForVisualViewport = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (currentTab.peek() === 'shell') {
+          fitTerminal();
+          sendResize();
+        }
+      });
+    };
+    vv.addEventListener('resize', fitForVisualViewport);
+    vv.addEventListener('scroll', fitForVisualViewport);
+  }
 }
 
 function fitTerminal() {
@@ -177,6 +221,21 @@ function activateShellTab() {
 }
 
 export function initTerminal() {
+  if (!terminalEventsBound) {
+    terminalEventsBound = true;
+    document.getElementById('term-keyboard')?.addEventListener('click', focusTerminal);
+    document.getElementById('term-mobile-keys')?.addEventListener('pointerdown', event => {
+      // Keep the terminal textarea focused while using the touch shortcut row.
+      if (event.target.closest('[data-term-key]')) event.preventDefault();
+    });
+    document.getElementById('term-mobile-keys')?.addEventListener('click', event => {
+      const key = event.target.closest('[data-term-key]')?.dataset.termKey;
+      if (!key || !mobileKeyData[key]) return;
+      sendInput(mobileKeyData[key]);
+      focusTerminal();
+    });
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     if (currentTab.peek() !== 'shell' || !shellWanted) return;

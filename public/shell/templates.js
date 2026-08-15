@@ -332,7 +332,17 @@ export const AppShell = (opts = {}) => {
           <div id="tab-shell" class="hidden flex-col flex-1 overflow-hidden bg-[#0d1117]">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b border-base-300 bg-base-200 flex-shrink-0">
               <span class="text-xs text-base-content/40 font-mono flex-1" id="term-cwd"></span>
+              <button id="term-keyboard" class="btn btn-ghost btn-xs text-xs text-base-content/60" type="button">Keyboard</button>
               <button id="term-reconnect" class="btn btn-ghost btn-xs text-xs text-base-content/40">Reconnect</button>
+            </div>
+            <div id="term-mobile-keys" class="hidden items-center gap-1 px-2 py-1 border-b border-slate-700 bg-[#161b22] flex-shrink-0" aria-label="Terminal shortcuts">
+              <button class="term-key" type="button" data-term-key="ctrl-c">Ctrl+C</button>
+              <button class="term-key" type="button" data-term-key="escape">Esc</button>
+              <button class="term-key" type="button" data-term-key="tab">Tab</button>
+              <button class="term-key" type="button" data-term-key="up">↑</button>
+              <button class="term-key" type="button" data-term-key="down">↓</button>
+              <button class="term-key" type="button" data-term-key="left">←</button>
+              <button class="term-key" type="button" data-term-key="right">→</button>
             </div>
             <div id="terminal-container" class="flex-1 p-2 overflow-hidden"></div>
           </div>

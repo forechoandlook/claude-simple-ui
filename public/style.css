@@ -1298,6 +1298,36 @@ html.pwa-standalone .ma-panel {
 #tab-shell { background: #0d1117; }
 #term-output { color: #c9d1d9; }
 
+/* xterm intentionally parks its input at -9999em and gives it no size. That
+ * works on desktop, but Safari and several Android WebViews then reject the
+ * focus request and silently leave the software keyboard closed. Keep it in
+ * the terminal's hit area on touch devices while remaining visually invisible. */
+@media (max-width: 640px) {
+  #term-mobile-keys { display: flex !important; }
+  #terminal-container { touch-action: manipulation; }
+  #terminal-container .xterm-helper-textarea {
+    left: 0 !important;
+    top: 0 !important;
+    width: 1px !important;
+    height: 1px !important;
+    opacity: 0.01 !important;
+    z-index: 6 !important;
+    font-size: 16px !important; /* prevent iOS focus zoom */
+  }
+  .term-key {
+    min-width: 38px;
+    min-height: 32px;
+    padding: 3px 7px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    background: #21262d;
+    font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .term-key:active { background: #30363d; }
+}
+
 /* ── Meta Agent panel (DaisyUI 5: use --color-* full values, solid surfaces) ── */
 .meta-agent-panel {
   position: fixed;
