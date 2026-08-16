@@ -1,7 +1,7 @@
 /* Agent UI service worker — cache shell assets only.
  * Never intercepts WebSocket or mutates API semantics beyond offline fallback.
  * Bump CACHE when shipping UI that must invalidate old shells. */
-const CACHE = 'agent-ui-shell-v14';
+const CACHE = 'agent-ui-shell-v15';
 const PRECACHE = [
   '/',
   '/index.html',
