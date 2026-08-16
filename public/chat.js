@@ -328,8 +328,12 @@ function handleWsMessage(msg) {
     return;
   }
   if (msg.type === 'session-created') {
+    const selectedModel = currentModel.peek();
     ctx.sessionId = msg.sessionId;
-    if (msg.agent) setAgent(msg.agent);
+    if (msg.agent && msg.agent !== currentAgent.peek()) setAgent(msg.agent);
+    // The first turn selected a model before a session id existed. Bind that
+    // choice as soon as the edge creates the session.
+    setCurrentModel(selectedModel, msg.agent || currentAgent.peek(), msg.sessionId);
     // Notify shell to refresh session list — use custom event to avoid circular import
     document.dispatchEvent(new CustomEvent('sessions-changed'));
     return;
@@ -809,6 +813,9 @@ export function sendMessage() {
     const effort     = currentEffort.peek();
     const permission = currentPermission.peek();
     const agent      = currentAgent.peek() || 'claude';
+    // Existing sessions retain their own picker value. New sessions are bound
+    // on the session-created event above.
+    if (ctx.sessionId) setCurrentModel(currentModel.peek(), agent, ctx.sessionId);
     const ok = sendWs({
       type: 'command',
       cmd: 'turn.start',

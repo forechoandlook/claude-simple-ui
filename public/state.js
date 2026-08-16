@@ -15,42 +15,48 @@ export const currentTab     = signal('chat');
 export const isProcessing   = signal(false);
 /** Chat socket: idle | connecting | open | reconnecting | offline */
 export const wsStatus       = signal('idle');
-const MODEL_BY_AGENT_KEY = 'modelByAgent';
+const MODEL_BY_SESSION_KEY = 'modelBySession';
 const initialAgent = localStorage.getItem('agent') || 'claude';
 
-function readModelByAgent() {
+function readModelBySession() {
   try {
-    const value = JSON.parse(localStorage.getItem(MODEL_BY_AGENT_KEY) || '{}');
+    const value = JSON.parse(localStorage.getItem(MODEL_BY_SESSION_KEY) || '{}');
     return value && typeof value === 'object' ? value : {};
   } catch {
     return {};
   }
 }
 
-/** Restore a model chosen for this agent. Falls back to the legacy global key. */
-export function getSavedModel(agent) {
+function modelSessionKey(agent, sessionId = ctx.sessionId, machineId = ctx.machineId) {
+  if (!sessionId) return '';
   const a = (agent || 'claude').toLowerCase();
-  const saved = readModelByAgent()[a];
-  if (typeof saved === 'string' && saved.trim()) return saved;
-  // Keep existing installations working after this preference format change.
-  return (localStorage.getItem('agent') || 'claude') === a ? localStorage.getItem('model') : null;
+  return `${machineId || ''}:${a}:${sessionId}`;
 }
 
-/** Persist a model choice without allowing another agent to overwrite it. */
-export function setCurrentModel(model, agent = currentAgent.peek()) {
+/** Restore the model explicitly selected for the active session. */
+export function getSavedModel(agent, sessionId = ctx.sessionId, machineId = ctx.machineId) {
+  const key = modelSessionKey(agent, sessionId, machineId);
+  if (!key) return null;
+  const saved = readModelBySession()[key];
+  if (typeof saved === 'string' && saved.trim()) return saved;
+  return null;
+}
+
+/** Update the picker and persist its value only when a session exists. */
+export function setCurrentModel(model, agent = currentAgent.peek(), sessionId = ctx.sessionId, machineId = ctx.machineId) {
   const value = String(model || '').trim();
   if (!value) return;
-  const a = (agent || 'claude').toLowerCase();
-  const saved = readModelByAgent();
-  saved[a] = value;
-  localStorage.setItem(MODEL_BY_AGENT_KEY, JSON.stringify(saved));
-  // Retain this key for backwards compatibility with older clients.
-  localStorage.setItem('model', value);
+  const key = modelSessionKey(agent, sessionId, machineId);
+  if (key) {
+    const saved = readModelBySession();
+    saved[key] = value;
+    localStorage.setItem(MODEL_BY_SESSION_KEY, JSON.stringify(saved));
+  }
   currentModel.value = value;
 }
 
 export const currentAgent      = signal(initialAgent); // 'claude'|'codex'|'grok'
-export const currentModel      = signal(getSavedModel(initialAgent) || 'claude-sonnet-4-5');
+export const currentModel      = signal('claude-sonnet-4-5');
 export const currentEffort     = signal('');
 // All local agents are trusted by default; users can still choose another mode
 // from the expanded composer options before starting a turn.
@@ -286,12 +292,11 @@ export function setAgent(agent) {
   currentPermission.value = 'bypassPermissions';
   const permissionSelect = typeof document === 'undefined' ? null : document.getElementById('sel-permission');
   if (permissionSelect) permissionSelect.value = currentPermission.peek();
-  // A saved choice may not yet appear in the discovered list (for example a
-  // newly released Grok model). It is still a deliberate user selection.
+  // Model selection belongs to a concrete session, not to the whole agent.
+  // New sessions start from the agent default until they receive a session id.
   const saved = getSavedModel(a);
   if (saved) {
     currentModel.value = saved;
-    localStorage.setItem('model', saved);
   } else {
     setCurrentModel(getDefaultModel(a), a);
   }
