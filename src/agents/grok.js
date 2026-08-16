@@ -1,327 +1,208 @@
 import { spawn } from 'child_process';
 import readline from 'readline';
 import crypto from 'crypto';
-import { createDeltaBatcher } from './stream-batch.js';
 
-/**
- * Run Grok CLI headlessly with streaming-json over WebSocket (not HTTP SSE).
- *
- * New turn:
- *   grok -p <prompt> --output-format streaming-json --cwd <dir> ...
- * Resume:
- *   grok --resume <sessionId> -p <prompt> --output-format streaming-json ...
- *
- * Stream events (line-delimited JSON):
- *   { type: "thought", data: "..." }
- *   { type: "text",    data: "..." }
- *   { type: "tool_*",  ... }   // when CLI emits them
- *   { type: "end", sessionId, usage, ... }
- *
- * We forward deltas immediately so the UI updates live instead of dumping at end.
- */
+// Grok's ACP transport is a long-lived JSON-RPC process.  Keeping it alive is
+// important: it owns the real Grok session and lets the edge, rather than an
+// individual browser tab, serialize follow-up prompts.
+const clients = new Map();
+const queues = new Map();
+const queueAliases = new Map();
 
-function mapPermission(permissionMode, allowBypass) {
-  if (allowBypass || permissionMode === 'bypassPermissions') return 'bypassPermissions';
-  if (permissionMode == null) return 'bypassPermissions';
-  if (permissionMode === 'default') return null;
-  return permissionMode;
+function profileKey(options) {
+  return `${options.model || ''}\u001f${options.effort || ''}`;
 }
 
-function buildArgs(command, options) {
-  const args = [];
-
-  if (options.sessionId) {
-    args.push('--resume', options.sessionId);
+class GrokACPClient {
+  constructor({ cliPath, model, effort }) {
+    const args = ['agent', '--always-approve'];
+    if (model) args.push('--model', model);
+    if (effort) args.push('--reasoning-effort', effort);
+    args.push('stdio');
+    this.child = spawn(cliPath || 'grok', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    this.pending = new Map();
+    this.listeners = new Map();
+    this.nextID = 1;
+    this.ready = this.initialize();
+    this.child.stderr.on('data', d => console.warn(`[grok acp] ${String(d).trim()}`));
+    this.child.on('close', () => {
+      for (const { reject } of this.pending.values()) reject(new Error('Grok ACP process stopped'));
+      this.pending.clear();
+      for (const fn of this.listeners.values()) fn({ type: 'error', message: 'Grok ACP process stopped', agent: 'grok' });
+      this.listeners.clear();
+    });
+    const rl = readline.createInterface({ input: this.child.stdout, crlfDelay: Infinity });
+    rl.on('line', line => this.receive(line));
   }
 
-  // -p = headless single-turn (required for non-TTY streaming-json)
-  args.push('-p', command || '');
-  args.push('--output-format', 'streaming-json');
-
-  if (options.cwd) args.push('--cwd', options.cwd);
-  if (options.model) args.push('--model', options.model);
-  if (options.effort) args.push('--reasoning-effort', options.effort);
-
-  const perm = mapPermission(options.permissionMode, options.allowDangerouslySkipPermissions);
-  if (perm) args.push('--permission-mode', perm);
-  if (options.allowDangerouslySkipPermissions || options.permissionMode === 'bypassPermissions') {
-    args.push('--always-approve');
+  async initialize() {
+    const init = await this.request('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
+      clientInfo: { name: 'claude-simple-ui', version: '0.2.7' },
+    });
+    const methods = new Set((init.authMethods || []).map(x => x?.id));
+    const methodId = process.env.XAI_API_KEY && methods.has('xai.api_key')
+      ? 'xai.api_key'
+      : (methods.has('cached_token') ? 'cached_token' : null);
+    if (methodId) await this.request('authenticate', { methodId, _meta: { headless: true } });
   }
 
-  if (options.newSessionId && !options.sessionId) {
-    args.push('--session-id', options.newSessionId);
-  }
-
-  return args;
-}
-
-function parseMaybeJson(v) {
-  if (v == null) return {};
-  if (typeof v === 'object') return v;
-  if (typeof v === 'string') {
-    try { return JSON.parse(v); } catch { return { input: v }; }
-  }
-  return { value: v };
-}
-
-export function runGrok(command, options, send, { cliPath, activeSessions }) {
-  return new Promise((resolve) => {
-    const sessionKey = options.sessionId || crypto.randomUUID();
-    const bin = cliPath || 'grok';
-    const args = buildArgs(command, options);
-
-    const env = { ...process.env };
-    env.CI = env.CI || '1';
-    // Reduce pipe buffering if the runtime honors it
-    env.PYTHONUNBUFFERED = '1';
-
-    let child;
-    try {
-      child = spawn(bin, args, {
-        cwd: options.cwd || process.cwd(),
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      send({ type: 'error', message: `Failed to start grok: ${e.message}`, agent: 'grok' });
-      resolve();
+  receive(line) {
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+    if (msg.id != null && this.pending.has(msg.id)) {
+      const pending = this.pending.get(msg.id);
+      this.pending.delete(msg.id);
+      if (msg.error) pending.reject(new Error(msg.error.message || 'Grok ACP request failed'));
+      else pending.resolve(msg.result || {});
       return;
     }
-
-    // Unbuffer stdout as much as possible
-    if (child.stdout?.setEncoding) child.stdout.setEncoding('utf8');
-
-    const entry = { kind: 'grok', child, startTime: Date.now(), busy: true, key: sessionKey, sessionId: options.sessionId || null };
-    activeSessions.set(sessionKey, entry);
-
-    let sessionId = options.sessionId || null;
-    let aborted = false;
-    let stderr = '';
-    let gotEnd = false;
-    let streamOpen = false; // live assistant bubble on the client
-    let thoughtOpen = false;
-    let textChars = 0;
-    let thoughtChars = 0;
-
-    const textBatch = createDeltaBatcher(send, 'assistant_delta', { agent: 'grok' }, { maxWait: 48, maxSize: 480 });
-    const thoughtBatch = createDeltaBatcher(send, 'thought_delta', { agent: 'grok' }, { maxWait: 140, maxSize: 600 });
-
-    child.stderr.on('data', d => { stderr += d.toString(); });
-
-    // Use 'readable' + line split for lower latency than waiting for large chunks
-    const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-
-    function ensureStream() {
-      if (!streamOpen) {
-        send({ type: 'assistant_stream_start', agent: 'grok', ts: Date.now() });
-        streamOpen = true;
-      }
+    // Grok's documented ACP client sample does not need client-side tool RPC.
+    // Return a structured error for optional extension calls instead of leaving
+    // an agent request hanging forever.
+    if (msg.id != null && msg.method) {
+      this.write({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: `Unsupported client method: ${msg.method}` } });
+      return;
     }
-
-    function endStream() {
-      textBatch.flush();
-      if (streamOpen) {
-        send({ type: 'assistant_stream_end', agent: 'grok' });
-        streamOpen = false;
-      }
+    if (msg.method === 'session/update') {
+      const sid = msg.params?.sessionId;
+      const fn = sid && this.listeners.get(sid);
+      if (fn) fn(msg.params?.update || {});
     }
+  }
 
-    function flushThought() {
-      if (!thoughtBatch.pending()) return;
-      if (!thoughtOpen) {
-        send({ type: 'thought_stream_start', agent: 'grok' });
-        thoughtOpen = true;
-      }
-      const n = thoughtBatch.pending();
-      thoughtBatch.flush();
-      thoughtChars += n;
-    }
+  write(data) {
+    if (!this.child.stdin?.writable) throw new Error('Grok ACP stdin is unavailable');
+    this.child.stdin.write(JSON.stringify(data) + '\n');
+  }
 
-    function emitTool(raw) {
-      // Finalize any open text/thought before tool card
-      flushThought();
-      if (thoughtOpen) {
-        send({ type: 'thought_stream_end', agent: 'grok' });
-        thoughtOpen = false;
-      }
-      endStream();
-
-      const name = raw.name || raw.tool || raw.toolName || raw.tool_name
-        || raw.title || raw.data?.name || 'tool';
-      let input = raw.input ?? raw.arguments ?? raw.args ?? raw.rawInput
-        ?? raw.data?.input ?? raw.data?.arguments ?? raw.data ?? {};
-      input = parseMaybeJson(input);
-
-      send({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', name, input }] },
-        agent: 'grok',
-        ts: Date.now(),
-      });
-    }
-
-    rl.on('line', (line) => {
-      if (!line.trim()) return;
-      let raw;
-      try { raw = JSON.parse(line); } catch {
-        // Non-JSON progress line — surface lightly
-        send({ type: 'status', message: line.slice(0, 200), agent: 'grok' });
-        return;
-      }
-
-      const t = String(raw.type || '').toLowerCase();
-
-      // ── Text tokens (batched ~50ms) ──────────────────────────────────────
-      if ((t === 'text' || t === 'message' || t === 'output_text') && raw.data != null) {
-        flushThought();
-        if (thoughtOpen) {
-          send({ type: 'thought_stream_end', agent: 'grok' });
-          thoughtOpen = false;
-        }
-        const chunk = String(raw.data);
-        if (!chunk) return;
-        ensureStream();
-        textChars += chunk.length;
-        textBatch.push(chunk);
-        return;
-      }
-
-      // ── Thinking tokens (batched stream) ────────────────────────────────
-      if ((t === 'thought' || t === 'thinking' || t === 'reasoning') && raw.data != null) {
-        if (!thoughtOpen) {
-          send({ type: 'thought_stream_start', agent: 'grok' });
-          thoughtOpen = true;
-        }
-        thoughtBatch.push(String(raw.data));
-        return;
-      }
-
-      // ── Tools ───────────────────────────────────────────────────────────
-      if (
-        t === 'tool_use' || t === 'tool_call' || t === 'tool_start'
-        || t === 'tool' || t === 'function_call' || t === 'tool_call_start'
-        || t.startsWith('tool_')
-      ) {
-        // Avoid treating tool_result as a new call
-        if (t === 'tool_result' || t === 'tool_call_update' || t === 'tool_end' || t === 'tool_call_end') {
-          return;
-        }
-        emitTool(raw);
-        return;
-      }
-
-      // ── Session id early (some builds emit before end) ───────────────────
-      if ((t === 'session' || t === 'session_started') && (raw.sessionId || raw.session_id)) {
-        sessionId = raw.sessionId || raw.session_id;
-        entry.sessionId = sessionId;
-        activeSessions.set(sessionId, entry);
-        if (!options.sessionId) {
-          send({ type: 'session-created', sessionId, agent: 'grok' });
-        }
-        return;
-      }
-
-      // ── End of turn ─────────────────────────────────────────────────────
-      if (t === 'end' || t === 'result' || t === 'done') {
-        gotEnd = true;
-        flushThought();
-        if (thoughtOpen) {
-          send({ type: 'thought_stream_end', agent: 'grok' });
-          thoughtOpen = false;
-        }
-        endStream();
-
-        if (raw.sessionId || raw.session_id) {
-          sessionId = raw.sessionId || raw.session_id;
-          entry.sessionId = sessionId;
-          activeSessions.set(sessionId, entry);
-          if (!options.sessionId) {
-            send({ type: 'session-created', sessionId, agent: 'grok' });
-          }
-        }
-
-        // Unlock UI immediately — process may linger after the turn ends.
-        entry.busy = false;
-
-        const u = raw.usage || {};
-        const costTicks = raw.total_cost_usd_ticks ?? u.cost_usd_ticks ?? u.costUsdTicks;
-        const costUSD = raw.total_cost_usd ?? u.cost_usd ?? u.costUSD
-          ?? (typeof costTicks === 'number' ? costTicks / 1e10 : undefined);
-
-        const sid = sessionId || sessionKey;
-        send({
-          type: 'result',
-          is_error: false,
-          usage: {
-            inputTokens: u.input_tokens || u.inputTokens || 0,
-            outputTokens: u.output_tokens || u.outputTokens || 0,
-            cacheReadInputTokens: u.cache_read_input_tokens || u.cachedReadTokens || 0,
-            totalTokens: u.total_tokens || u.totalTokens
-              || ((u.input_tokens || u.inputTokens || 0) + (u.output_tokens || u.outputTokens || 0)),
-            reasoningTokens: u.reasoning_tokens || u.reasoningTokens || 0,
-            costUSD,
-          },
-          sessionId: sid,
-          agent: 'grok',
-          stats: { textChars, thoughtChars },
-        });
-        // Early complete so client can send next turn without waiting for process exit.
-        send({ type: 'complete', exitCode: 0, sessionId: sid, agent: 'grok' });
-        return;
-      }
-
-      if (t === 'error') {
-        entry.busy = false;
-        send({ type: 'error', message: raw.message || raw.data || 'grok error', agent: 'grok' });
-      }
+  request(method, params) {
+    const id = this.nextID++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      try { this.write({ jsonrpc: '2.0', id, method, params }); }
+      catch (e) { this.pending.delete(id); reject(e); }
     });
+  }
 
-    child.on('close', (code) => {
-      flushThought();
-      if (thoughtOpen) send({ type: 'thought_stream_end', agent: 'grok' });
-      endStream();
-      rl.close();
-      entry.busy = false;
-      activeSessions.delete(sessionKey);
-      if (sessionId) activeSessions.delete(sessionId);
-
-      // Skip duplicate complete if turn already finished via streaming-json "end".
-      if (gotEnd && !aborted) {
-        resolve();
-        return;
+  async ensureSession(options) {
+    await this.ready;
+    if (options.sessionId) {
+      try {
+        await this.request('session/load', { sessionId: options.sessionId, cwd: options.cwd, mcpServers: [] });
+      } catch {
+        await this.request('session/resume', { sessionId: options.sessionId, cwd: options.cwd, mcpServers: [] });
       }
+      return options.sessionId;
+    }
+    const result = await this.request('session/new', {
+      cwd: options.cwd || process.cwd(),
+      mcpServers: [],
+      _meta: { yoloMode: true },
+    });
+    if (!result.sessionId) throw new Error('Grok ACP did not return a session id');
+    return result.sessionId;
+  }
+}
 
-      if (aborted) {
-        send({ type: 'complete', exitCode: 130, aborted: true, sessionId: sessionId || sessionKey, agent: 'grok' });
-      } else if (code !== 0 && code != null && !gotEnd) {
-        const errMsg = stderr.trim().split('\n').filter(l => !/stdin is not a terminal/i.test(l)).join('\n')
-          || `grok exited with code ${code}`;
-        send({ type: 'error', message: errMsg, agent: 'grok' });
-        send({ type: 'complete', exitCode: code, sessionId: sessionId || sessionKey, agent: 'grok' });
-      } else {
-        if (sessionId && !options.sessionId && !gotEnd) {
-          send({ type: 'session-created', sessionId, agent: 'grok' });
-        }
-        send({ type: 'complete', exitCode: code ?? 0, sessionId: sessionId || sessionKey, agent: 'grok' });
+function clientFor(options, cliPath) {
+  const key = profileKey(options);
+  let client = clients.get(key);
+  if (!client || client.child.exitCode != null) {
+    client = new GrokACPClient({ cliPath, model: options.model, effort: options.effort });
+    clients.set(key, client);
+  }
+  return client;
+}
+
+function emitUpdate(update, send, sessionId, state) {
+  const kind = update?.sessionUpdate;
+  if (kind === 'agent_message_chunk' && update.content?.text) {
+    if (!state.textOpen) { send({ type: 'assistant_stream_start', agent: 'grok', ts: Date.now() }); state.textOpen = true; }
+    send({ type: 'assistant_delta', data: update.content.text, agent: 'grok' });
+  } else if (kind === 'agent_thought_chunk' && update.content?.text) {
+    if (!state.thoughtOpen) { send({ type: 'thought_stream_start', agent: 'grok' }); state.thoughtOpen = true; }
+    send({ type: 'thought_delta', data: update.content.text, agent: 'grok' });
+  } else if (kind === 'tool_call' || kind === 'tool_call_update') {
+    if (state.textOpen) { send({ type: 'assistant_stream_end', agent: 'grok' }); state.textOpen = false; }
+    if (state.thoughtOpen) { send({ type: 'thought_stream_end', agent: 'grok' }); state.thoughtOpen = false; }
+    if (kind === 'tool_call') {
+      send({ type: 'assistant', agent: 'grok', message: { content: [{
+        type: 'tool_use', name: update.title || update.kind || 'tool', input: update.rawInput || update.input || {},
+      }] } });
+    }
+  }
+}
+
+async function runOne(item, { cliPath, activeSessions, queueKey }) {
+  const { command, options, send } = item;
+  const client = clientFor(options, cliPath);
+  const localKey = options.sessionId || crypto.randomUUID();
+  const entry = { kind: 'grok-acp', startTime: Date.now(), busy: true, key: localKey, sessionId: options.sessionId || null };
+  activeSessions.set(localKey, entry);
+  const state = { textOpen: false, thoughtOpen: false };
+  let sessionId = options.sessionId;
+  try {
+    sessionId = await client.ensureSession(options);
+    queueAliases.set(sessionId, queueKey);
+    entry.sessionId = sessionId;
+    activeSessions.set(sessionId, entry);
+    entry.abort = () => { client.write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } }); };
+    if (!options.sessionId) send({ type: 'session-created', sessionId, agent: 'grok' });
+    client.listeners.set(sessionId, update => emitUpdate(update, send, sessionId, state));
+    const result = await client.request('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: command }],
+    });
+    if (state.textOpen) send({ type: 'assistant_stream_end', agent: 'grok' });
+    if (state.thoughtOpen) send({ type: 'thought_stream_end', agent: 'grok' });
+    entry.busy = false;
+    send({ type: 'result', is_error: result.stopReason === 'error', usage: result._meta?.usage || null, sessionId, agent: 'grok' });
+    send({ type: 'complete', exitCode: result.stopReason === 'cancelled' ? 130 : 0, aborted: result.stopReason === 'cancelled', sessionId, agent: 'grok' });
+  } catch (e) {
+    entry.busy = false;
+    send({ type: 'error', message: e.message, sessionId, agent: 'grok' });
+    send({ type: 'complete', exitCode: 1, sessionId, agent: 'grok' });
+  } finally {
+    if (sessionId) client.listeners.delete(sessionId);
+    activeSessions.delete(localKey);
+    if (sessionId) activeSessions.delete(sessionId);
+  }
+}
+
+/** Queue all Grok follow-ups at the edge. The promise resolves after this item runs. */
+export function runGrok(command, options, send, { cliPath, activeSessions }) {
+  const key = (options.sessionId && queueAliases.get(options.sessionId)) || options.sessionId || `new:${options.cwd || ''}`;
+  const queue = queues.get(key) || { items: [], running: false };
+  queues.set(key, queue);
+  return new Promise(resolve => {
+    queue.items.push({ command, options, send, resolve });
+    if (queue.running) {
+      send({ type: 'status', message: `Grok follow-up queued (${queue.items.length - 1} ahead)`, sessionId: options.sessionId, agent: 'grok' });
+      return;
+    }
+    queue.running = true;
+    const drain = async () => {
+      while (queue.items.length) {
+        const item = queue.items.shift();
+        await runOne(item, { cliPath, activeSessions, queueKey: key });
+        item.resolve();
       }
-      resolve();
-    });
-
-    child.on('error', (e) => {
-      entry.busy = false;
-      activeSessions.delete(sessionKey);
-      if (sessionId) activeSessions.delete(sessionId);
-      send({ type: 'error', message: e.message, agent: 'grok' });
-      resolve();
-    });
-
-    entry.abort = () => {
-      aborted = true;
-      try { child.kill('SIGTERM'); } catch {}
-      setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000);
+      queue.running = false;
+      queues.delete(key);
+      for (const [sid, alias] of queueAliases) if (alias === key) queueAliases.delete(sid);
     };
-
-    // Tell UI a run started (typing indicator already on; optional status)
-    send({ type: 'status', message: 'Grok running…', agent: 'grok' });
+    void drain();
   });
+}
+
+export async function interruptGrok(sessionId) {
+  for (const client of clients.values()) {
+    if (client.listeners.has(sessionId)) {
+      client.write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
+      return true;
+    }
+  }
+  return false;
 }

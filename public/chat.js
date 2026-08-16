@@ -773,6 +773,27 @@ export function sendMessage() {
 
   // While a turn is running, queue the next message (common Grok complaint).
   if (isProcessing.peek()) {
+    // Grok owns its queue on the edge through a long-lived ACP process. Send
+    // immediately so a page reload cannot discard this follow-up in the tab.
+    if (currentAgent.peek() === 'grok' && ctx.sessionId) {
+      const agent = 'grok';
+      const ok = sendWs({
+        type: 'command', cmd: 'turn.start', agent, command: text, sessionId: ctx.sessionId,
+        options: {
+          agent, cwd: currentProject.peek().path, sessionId: ctx.sessionId,
+          configDir: ctx.configDir, model: currentModel.peek(),
+          ...(currentEffort.peek() && { effort: currentEffort.peek() }),
+          ...(currentPermission.peek() && { permissionMode: currentPermission.peek() }),
+          ...(currentPermission.peek() === 'bypassPermissions' && { allowDangerouslySkipPermissions: true }),
+        },
+      });
+      input.value = '';
+      autoResize(input);
+      updateInputMode('');
+      clearPendingAttachments();
+      appendSystemMsg(ok ? '已加入 Grok 服务端队列，刷新页面不会丢失' : '连接未就绪，消息将在重连后发送');
+      return;
+    }
     pendingUserTexts.push({ key: draftKey(), text });
     input.value = '';
     autoResize(input);
