@@ -2,7 +2,7 @@
 import { batch, esc, $ } from '../lib.js';
 import {
   workspacesData, sessionFilter, filesPath, viewingFile, currentProject,
-  filesRoot, gitRoot, currentModel, currentAgent, setAgent,
+  filesRoot, gitRoot, currentModel, currentAgent, setAgent, setCurrentModel,
   hubMode, machinesList, selectedMachineId, setSelectedMachine,
   getDefaultModel, AGENT_LABELS, ctx,
 } from '../state.js';
@@ -204,8 +204,7 @@ export async function startNewSession() {
     ctx.configDir = configDir || null;
     ctx.agent = agent;
     setAgent(agent);
-    currentModel.value = getDefaultModel(agent) || currentModel.peek();
-    localStorage.setItem('model', currentModel.peek());
+    setCurrentModel(getDefaultModel(agent) || currentModel.peek());
     refreshModelSelect();
     batch(() => {
       currentProject.value = { id: name, name, path: result.path, machineId: selectedMachineId.peek() || ctx.machineId };

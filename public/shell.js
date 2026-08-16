@@ -6,7 +6,7 @@ import {
   sessionsData, workspacesData, sessionFilter, sessionSearch,
   expandedFolders, collapsedFolders, filesPath, viewingFile, filteredSessions, projectGroups,
   currentProject, currentTab, filesRoot, gitRoot,
-  currentModel, currentEffort, currentPermission, currentAgent, setAgent,
+  currentModel, currentEffort, currentPermission, currentAgent, setAgent, setCurrentModel,
   sidebarView, agentFilter, timeRange, activityHits, activityLoading,
   chatDensity, setChatDensity,
   favoritesOnly, showHiddenOnly, hubMode, hubMachineReady, selectedMachineId, setSelectedMachine,
@@ -523,8 +523,7 @@ export function initShell(opts = {}) {
     if (prev !== next) {
       ctx.sessionId = null;
       setAgent(next);
-      currentModel.value = getDefaultModel(next) || currentModel.peek();
-      localStorage.setItem('model', currentModel.peek());
+      setCurrentModel(getDefaultModel(next) || currentModel.peek());
       $('sel-permission').value = currentPermission.peek();
       refreshModelSelect();
       appendSystemMsg(`Agent → ${AGENT_LABELS[next] || next} · model ${currentModel.peek()} · new session`);
@@ -558,8 +557,7 @@ export function initShell(opts = {}) {
     }
   });
   delegate.on('change', '#sel-model', (_, el) => {
-    currentModel.value = el.value;
-    localStorage.setItem('model', el.value);
+    setCurrentModel(el.value);
     refreshEffortSelect();
   });
   delegate.on('click', '#btn-model-add', () => promptCustomModel({ editCurrent: false }));

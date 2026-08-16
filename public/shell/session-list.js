@@ -8,7 +8,7 @@ import {
   sessionMetaMap, LOW_TURN_THRESHOLD, metaKey, sessionDisplayTitle,
   hubMode, selectedMachineId, agentsMeta, currentEffort,
   getModelsForAgent, getDefaultModel, getEffortsForModel,
-  addCustomModel, removeCustomModel, getCustomModels, ctx,
+  addCustomModel, removeCustomModel, getCustomModels, setCurrentModel, ctx,
 } from '../state.js';
 import { api, NOT_MODIFIED } from '../api.js';
 import { getCachedSessions, setCachedSessions, getCachedWorkspaces, setCachedWorkspaces } from '../cache.js';
@@ -158,15 +158,8 @@ export async function loadAgentsMeta() {
   try {
     const data = await api('GET', '/api/agents');
     agentsMeta.value = data;
-    // Align current model with discovered list for active agent
-    const agent = currentAgent.peek() || 'claude';
-    const models = getModelsForAgent(agent);
-    const cur = currentModel.peek();
-    if (cur && !models.some(m => m.value === cur)) {
-      const def = getDefaultModel(agent);
-      currentModel.value = def;
-      localStorage.setItem('model', def);
-    }
+    // Do not replace a user's saved model merely because discovery has not
+    // listed it yet. refreshModelSelect renders it as a custom entry instead.
     refreshModelSelect();
     return data;
   } catch (e) {
@@ -210,8 +203,7 @@ export function refreshModelSelect() {
   ).join('');
   if (!models.some(m => m.value === cur)) {
     const def = getDefaultModel(agent) || models[0]?.value;
-    currentModel.value = def;
-    localStorage.setItem('model', def);
+    setCurrentModel(def);
     sel.value = def;
     cur = def;
   } else {
@@ -241,8 +233,7 @@ export function promptCustomModel({ editCurrent = false } = {}) {
     removeCustomModel(agent, initial);
   }
   addCustomModel(agent, id);
-  currentModel.value = id;
-  localStorage.setItem('model', id);
+  setCurrentModel(id);
   refreshModelSelect();
 }
 

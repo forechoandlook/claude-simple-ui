@@ -15,8 +15,42 @@ export const currentTab     = signal('chat');
 export const isProcessing   = signal(false);
 /** Chat socket: idle | connecting | open | reconnecting | offline */
 export const wsStatus       = signal('idle');
-export const currentAgent      = signal(localStorage.getItem('agent') || 'claude'); // 'claude'|'codex'|'grok'
-export const currentModel      = signal(localStorage.getItem('model') || 'claude-sonnet-4-5');
+const MODEL_BY_AGENT_KEY = 'modelByAgent';
+const initialAgent = localStorage.getItem('agent') || 'claude';
+
+function readModelByAgent() {
+  try {
+    const value = JSON.parse(localStorage.getItem(MODEL_BY_AGENT_KEY) || '{}');
+    return value && typeof value === 'object' ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Restore a model chosen for this agent. Falls back to the legacy global key. */
+export function getSavedModel(agent) {
+  const a = (agent || 'claude').toLowerCase();
+  const saved = readModelByAgent()[a];
+  if (typeof saved === 'string' && saved.trim()) return saved;
+  // Keep existing installations working after this preference format change.
+  return (localStorage.getItem('agent') || 'claude') === a ? localStorage.getItem('model') : null;
+}
+
+/** Persist a model choice without allowing another agent to overwrite it. */
+export function setCurrentModel(model, agent = currentAgent.peek()) {
+  const value = String(model || '').trim();
+  if (!value) return;
+  const a = (agent || 'claude').toLowerCase();
+  const saved = readModelByAgent();
+  saved[a] = value;
+  localStorage.setItem(MODEL_BY_AGENT_KEY, JSON.stringify(saved));
+  // Retain this key for backwards compatibility with older clients.
+  localStorage.setItem('model', value);
+  currentModel.value = value;
+}
+
+export const currentAgent      = signal(initialAgent); // 'claude'|'codex'|'grok'
+export const currentModel      = signal(getSavedModel(initialAgent) || 'claude-sonnet-4-5');
 export const currentEffort     = signal('');
 // All local agents are trusted by default; users can still choose another mode
 // from the expanded composer options before starting a turn.
@@ -252,11 +286,14 @@ export function setAgent(agent) {
   currentPermission.value = 'bypassPermissions';
   const permissionSelect = typeof document === 'undefined' ? null : document.getElementById('sel-permission');
   if (permissionSelect) permissionSelect.value = currentPermission.peek();
-  const models = getModelsForAgent(a);
-  const def = getDefaultModel(a);
-  if (!models.some(m => m.value === currentModel.peek())) {
-    currentModel.value = def;
-    localStorage.setItem('model', def);
+  // A saved choice may not yet appear in the discovered list (for example a
+  // newly released Grok model). It is still a deliberate user selection.
+  const saved = getSavedModel(a);
+  if (saved) {
+    currentModel.value = saved;
+    localStorage.setItem('model', saved);
+  } else {
+    setCurrentModel(getDefaultModel(a), a);
   }
 }
 

@@ -2,7 +2,7 @@
 import { watch, delegate, esc, $ } from './lib.js';
 import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEffort, currentPermission,
          currentAgent, setAgent, AGENT_LABELS, getDefaultModel, getModelsForAgent, getEffortsForModel,
-         addCustomModel, chatDensity, wsStatus } from './state.js';
+         addCustomModel, setCurrentModel, chatDensity, wsStatus } from './state.js';
 import { sendWs, api, authHeaders, flushWsQueue, clearWsQueue } from './api.js';
 import { initWakeLock, setWakeLockDesired } from './wake-lock.js';
 import { pushNotification } from './notifications.js';
@@ -584,8 +584,7 @@ function handleSlashCommand(text) {
       if (a !== currentAgent.peek()) {
         ctx.sessionId = null;
         setAgent(a);
-        currentModel.value = getDefaultModel(a);
-        localStorage.setItem('model', currentModel.peek());
+        setCurrentModel(getDefaultModel(a));
         document.dispatchEvent(new CustomEvent('agent-changed'));
         appendSystemMsg(`Agent → ${AGENT_LABELS[a]} · model ${currentModel.peek()} · new session`);
       } else {
@@ -605,8 +604,7 @@ function handleSlashCommand(text) {
       // Persist free-form ids so they stay in the model dropdown
       const known = getModelsForAgent(agent).some(m => m.value === resolved);
       if (!known) addCustomModel(agent, resolved);
-      currentModel.value = resolved;
-      localStorage.setItem('model', resolved);
+      setCurrentModel(resolved);
       appendSystemMsg(`Model set to ${resolved}${known ? '' : ' (saved as custom ★)'}`);
       document.dispatchEvent(new CustomEvent('agent-changed'));
       return true;
