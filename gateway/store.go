@@ -42,6 +42,31 @@ type metaNoteEntry struct {
 	UpdatedAt int64    `json:"updatedAt"`
 }
 
+type notificationEntry struct {
+	ID            string         `json:"id"`
+	User          string         `json:"user"`
+	Type          string         `json:"type"`
+	Title         string         `json:"title"`
+	Body          string         `json:"body"`
+	Unread        bool           `json:"unread"`
+	CreatedAt     int64          `json:"createdAt"`
+	SessionID     string         `json:"sessionId,omitempty"`
+	Agent         string         `json:"agent,omitempty"`
+	MachineID     string         `json:"machineId,omitempty"`
+	Cwd           string         `json:"cwd,omitempty"`
+	ProjectName   string         `json:"projectName,omitempty"`
+	PromptPreview string         `json:"promptPreview,omitempty"`
+	ResultPreview string         `json:"resultPreview,omitempty"`
+	Meta          map[string]any `json:"meta,omitempty"`
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 type hubStore struct {
 	mu   sync.Mutex
 	dir  string
@@ -51,6 +76,8 @@ type hubStore struct {
 	projectNotes map[string]projectNoteEntry
 	// metaNotes: noteID → entry
 	metaNotes map[string]metaNoteEntry
+	// notifications: newest first
+	notifications []notificationEntry
 	// importOnce: pull legacy edge meta once if hub file was empty
 	importedMeta bool
 }
@@ -65,6 +92,7 @@ func newHubStore(dir string) *hubStore {
 		sessionMeta:  map[string]sessionMetaEntry{},
 		projectNotes: map[string]projectNoteEntry{},
 		metaNotes:    map[string]metaNoteEntry{},
+		notifications: []notificationEntry{},
 	}
 	s.load()
 	return s
@@ -72,6 +100,9 @@ func newHubStore(dir string) *hubStore {
 
 func (s *hubStore) metaPath() string  { return filepath.Join(s.dir, "session_meta.json") }
 func (s *hubStore) notesPath() string { return filepath.Join(s.dir, "project_notes.json") }
+func (s *hubStore) notificationsPath() string {
+	return filepath.Join(s.dir, "notifications.json")
+}
 func (s *hubStore) metaNotesPath() string {
 	return filepath.Join(s.dir, "meta_notes.json")
 }
@@ -95,6 +126,12 @@ func (s *hubStore) load() {
 		var m map[string]metaNoteEntry
 		if json.Unmarshal(raw, &m) == nil && m != nil {
 			s.metaNotes = m
+		}
+	}
+	if raw, err := os.ReadFile(s.notificationsPath()); err == nil {
+		var rows []notificationEntry
+		if json.Unmarshal(raw, &rows) == nil && rows != nil {
+			s.notifications = rows
 		}
 	}
 	log.Printf("[hub-store] loaded dir=%s sessionMeta=%d projectNotes=%d",
@@ -135,6 +172,18 @@ func (s *hubStore) saveMetaNotesLocked() error {
 		return err
 	}
 	return os.Rename(tmp, s.metaNotesPath())
+}
+
+func (s *hubStore) saveNotificationsLocked() error {
+	raw, err := json.MarshalIndent(s.notifications, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := s.notificationsPath() + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.notificationsPath())
 }
 
 func sessionMetaKey(machineID, agent, sessionID string) string {
@@ -218,6 +267,110 @@ func (s *hubStore) mergeImportedSessionMeta(entries map[string]sessionMetaEntry)
 		return n, err
 	}
 	return n, nil
+}
+
+func (s *hubStore) listNotifications(user string, limit int) []notificationEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]notificationEntry, 0, minInt(limit, len(s.notifications)))
+	for _, row := range s.notifications {
+		if user != "" && row.User != "" && row.User != user {
+			continue
+		}
+		out = append(out, row)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (s *hubStore) unreadNotificationCount(user string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, row := range s.notifications {
+		if user != "" && row.User != "" && row.User != user {
+			continue
+		}
+		if row.Unread {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *hubStore) addNotification(row notificationEntry) (notificationEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if row.ID == "" {
+		row.ID = newMetaNoteID()
+	}
+	if row.Type == "" {
+		row.Type = "session_done"
+	}
+	if row.CreatedAt == 0 {
+		row.CreatedAt = time.Now().UnixMilli()
+	}
+	row.Unread = true
+	s.notifications = append([]notificationEntry{row}, s.notifications...)
+	if len(s.notifications) > 500 {
+		s.notifications = s.notifications[:500]
+	}
+	return row, s.saveNotificationsLocked()
+}
+
+func (s *hubStore) markNotificationsRead(user string, ids []string) ([]notificationEntry, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var idSet map[string]struct{}
+	if len(ids) > 0 {
+		idSet = make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			idSet[id] = struct{}{}
+		}
+	}
+	changed := false
+	for i := range s.notifications {
+		row := &s.notifications[i]
+		if user != "" && row.User != "" && row.User != user {
+			continue
+		}
+		if !row.Unread {
+			continue
+		}
+		if idSet == nil {
+			row.Unread = false
+			changed = true
+			continue
+		}
+		if _, ok := idSet[row.ID]; ok {
+			row.Unread = false
+			changed = true
+		}
+	}
+	if changed {
+		if err := s.saveNotificationsLocked(); err != nil {
+			return nil, 0, err
+		}
+	}
+	rows := make([]notificationEntry, 0, minInt(200, len(s.notifications)))
+	unread := 0
+	for _, row := range s.notifications {
+		if user != "" && row.User != "" && row.User != user {
+			continue
+		}
+		if row.Unread {
+			unread++
+		}
+		if len(rows) < 200 {
+			rows = append(rows, row)
+		}
+	}
+	return rows, unread, nil
 }
 
 func (s *hubStore) getProjectNote(key string) projectNoteEntry {

@@ -23,6 +23,9 @@ import {
 import { syncHash } from './router.js';
 import { initSettings, openSettings } from './settings.js';
 import { openMetaAgent, toggleMetaAgent } from './agent-panel.js';
+import {
+  initNotifications, refreshNotifications, toggleNotificationsMenu, closeNotificationsMenu,
+} from './notifications.js';
 
 import { AuthScreen, AppShell } from './shell/templates.js';
 import {
@@ -306,6 +309,7 @@ export function initShell(opts = {}) {
 
   initSidebarResize();
   initSidebarToggle();
+  initNotifications({ openSession: resumeSession });
 
   let sessionsChangedTimer = null;
   document.addEventListener('sessions-changed', () => {
@@ -590,6 +594,7 @@ export function initShell(opts = {}) {
       return;
     }
     await enterMachine(id, { forceReload: true });
+    refreshNotifications();
   });
   const refreshMachinesUi = async () => {
     const st = $('machine-picker-status');
@@ -611,6 +616,7 @@ export function initShell(opts = {}) {
   delegate.on('click', '#btn-machine-menu', async e => {
     e.stopPropagation();
     closeRecentMenu();
+    closeNotificationsMenu();
     const menu = $('machine-menu');
     if (!menu) return;
     if (menu.classList.contains('hidden')) {
@@ -625,6 +631,7 @@ export function initShell(opts = {}) {
     e.preventDefault();
     e.stopPropagation();
     closeMachineMenu();
+    closeNotificationsMenu();
     toggleRecentMenu();
     const open = !$('recent-menu')?.classList.contains('hidden');
     const btn = $('btn-recent-sessions');
@@ -648,6 +655,13 @@ export function initShell(opts = {}) {
       closeRecentMenu();
       btn?.setAttribute('aria-expanded', 'false');
     }
+  });
+  delegate.on('click', '#btn-notifications', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeMachineMenu();
+    closeRecentMenu();
+    toggleNotificationsMenu();
   });
   // Keep panel glued under topbar on rotate / URL bar show-hide
   window.addEventListener('resize', () => {
@@ -761,6 +775,12 @@ export function initShell(opts = {}) {
   });
 
   refreshModelSelect();
+  effect(() => {
+    void hubMode.value;
+    void selectedMachineId.value;
+    if (!ctx.token) return;
+    refreshNotifications();
+  });
   $('sel-permission').value = currentPermission.peek();
   applyChatDensity();
   const dens = $('sel-density');

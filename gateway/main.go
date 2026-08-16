@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -171,6 +173,14 @@ type pendingTunnel struct {
 type browserSock struct {
 	mu   sync.Mutex
 	conn *websocket.Conn
+	user        string
+	machineID   string
+	wsPath      string
+	sessionID   string
+	agent       string
+	cwd         string
+	prompt      string
+	notifySent  bool
 }
 
 func (b *browserSock) write(mt int, data []byte) error {
@@ -211,6 +221,296 @@ func newGateway(token string) *gateway {
 		pendingTun:    make(map[string]*pendingTunnel),
 		activeTunnels: make(map[string]*browserSock),
 	}
+}
+
+func trimText(value string, max int) string {
+	text := strings.TrimSpace(strings.Join(strings.Fields(value), " "))
+	if text == "" || max <= 0 || len(text) <= max {
+		return text
+	}
+	return text[:max-1] + "…"
+}
+
+func projectNameFromCwd(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return "Session"
+	}
+	parts := strings.Split(cwd, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] != "" {
+			return parts[i]
+		}
+	}
+	return cwd
+}
+
+func smtpEnabled() bool {
+	return os.Getenv("SMTP_HOST") != "" &&
+		os.Getenv("SMTP_PORT") != "" &&
+		os.Getenv("SMTP_USER") != "" &&
+		os.Getenv("SMTP_PASS") != "" &&
+		os.Getenv("SMTP_FROM") != "" &&
+		os.Getenv("NOTIFY_EMAIL_TO") != ""
+}
+
+func (g *gateway) sendNotificationEmail(row notificationEntry) {
+	if !smtpEnabled() {
+		return
+	}
+	go func() {
+		host := os.Getenv("SMTP_HOST")
+		port := os.Getenv("SMTP_PORT")
+		addr := host + ":" + port
+		from := os.Getenv("SMTP_FROM")
+		to := os.Getenv("NOTIFY_EMAIL_TO")
+		user := os.Getenv("SMTP_USER")
+		pass := os.Getenv("SMTP_PASS")
+
+		lines := []string{
+			fmt.Sprintf("Subject: [Agent UI] %s", row.Title),
+			fmt.Sprintf("From: %s", from),
+			fmt.Sprintf("To: %s", to),
+			"MIME-Version: 1.0",
+			"Content-Type: text/plain; charset=UTF-8",
+			"",
+			row.Title,
+			"",
+			"Time: " + time.UnixMilli(row.CreatedAt).Format(time.RFC3339),
+			"Agent: " + row.Agent,
+		}
+		if row.MachineID != "" {
+			lines = append(lines, "Machine: "+row.MachineID)
+		}
+		if row.ProjectName != "" {
+			lines = append(lines, "Project: "+row.ProjectName)
+		}
+		if row.Cwd != "" {
+			lines = append(lines, "Path: "+row.Cwd)
+		}
+		if row.SessionID != "" {
+			lines = append(lines, "Session: "+row.SessionID)
+		}
+		if row.PromptPreview != "" {
+			lines = append(lines, "Prompt: "+row.PromptPreview)
+		}
+		if row.ResultPreview != "" {
+			lines = append(lines, "Result: "+row.ResultPreview)
+		}
+		msg := []byte(strings.Join(lines, "\r\n"))
+
+		auth := smtp.PlainAuth("", user, pass, host)
+		if port == "465" || strings.EqualFold(os.Getenv("SMTP_SECURE"), "1") || strings.EqualFold(os.Getenv("SMTP_SECURE"), "true") {
+			conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: host})
+			if err != nil {
+				log.Printf("[hub-notify] smtp tls dial: %v", err)
+				return
+			}
+			defer conn.Close()
+			client, err := smtp.NewClient(conn, host)
+			if err != nil {
+				log.Printf("[hub-notify] smtp client: %v", err)
+				return
+			}
+			defer client.Close()
+			if err := client.Auth(auth); err != nil {
+				log.Printf("[hub-notify] smtp auth: %v", err)
+				return
+			}
+			if err := client.Mail(from); err != nil {
+				log.Printf("[hub-notify] smtp mail: %v", err)
+				return
+			}
+			if err := client.Rcpt(to); err != nil {
+				log.Printf("[hub-notify] smtp rcpt: %v", err)
+				return
+			}
+			w, err := client.Data()
+			if err != nil {
+				log.Printf("[hub-notify] smtp data: %v", err)
+				return
+			}
+			if _, err := w.Write(msg); err != nil {
+				log.Printf("[hub-notify] smtp write: %v", err)
+			}
+			_ = w.Close()
+			_ = client.Quit()
+			return
+		}
+		if err := smtp.SendMail(addr, auth, from, []string{to}, msg); err != nil {
+			log.Printf("[hub-notify] smtp send: %v", err)
+		}
+	}()
+}
+
+func (g *gateway) broadcastNotification(user string, row notificationEntry) {
+	g.tunMu.Lock()
+	defer g.tunMu.Unlock()
+	for _, browser := range g.activeTunnels {
+		if browser == nil || browser.wsPath != "/ws/chat" {
+			continue
+		}
+		if user != "" && browser.user != user {
+			continue
+		}
+		payload := map[string]any{
+			"type":         "notification",
+			"notification": row,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			continue
+		}
+		_ = browser.write(websocket.TextMessage, raw)
+	}
+}
+
+func (g *gateway) emitNotification(browser *browserSock, sessionID, resultPreview string) {
+	if browser == nil || browser.notifySent || browser.user == "" {
+		return
+	}
+	agent := strings.TrimSpace(browser.agent)
+	if agent == "" {
+		agent = "claude"
+	}
+	row, err := g.store.addNotification(notificationEntry{
+		User:          browser.user,
+		Type:          "session_done",
+		Title:         strings.ToUpper(agent) + " done · " + projectNameFromCwd(browser.cwd),
+		Body:          trimText(resultPreview, 180),
+		CreatedAt:     time.Now().UnixMilli(),
+		SessionID:     sessionID,
+		Agent:         agent,
+		MachineID:     browser.machineID,
+		Cwd:           browser.cwd,
+		ProjectName:   projectNameFromCwd(browser.cwd),
+		PromptPreview: trimText(browser.prompt, 240),
+		ResultPreview: trimText(resultPreview, 240),
+	})
+	if err != nil {
+		log.Printf("[hub-notify] save: %v", err)
+		return
+	}
+	browser.notifySent = true
+	g.broadcastNotification(browser.user, row)
+	g.sendNotificationEmail(row)
+}
+
+func (g *gateway) handleBrowserOutbound(browser *browserSock, payload []byte) {
+	if browser == nil || browser.wsPath != "/ws/chat" {
+		return
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return
+	}
+	if typ, _ := msg["type"].(string); typ == "subscribe" {
+		if sid, _ := msg["sessionId"].(string); sid != "" {
+			browser.sessionID = sid
+		}
+		return
+	}
+	if typ, _ := msg["type"].(string); typ == "command" {
+		if cmd, _ := msg["cmd"].(string); cmd == "turn.start" {
+			browser.notifySent = false
+			if command, _ := msg["command"].(string); command != "" {
+				browser.prompt = command
+			}
+			if agent, _ := msg["agent"].(string); agent != "" {
+				browser.agent = agent
+			}
+			if sid, _ := msg["sessionId"].(string); sid != "" {
+				browser.sessionID = sid
+			}
+			if options, ok := msg["options"].(map[string]any); ok {
+				if cwd, _ := options["cwd"].(string); cwd != "" {
+					browser.cwd = cwd
+				}
+				if agent, _ := options["agent"].(string); agent != "" {
+					browser.agent = agent
+				}
+				if sid, _ := options["sessionId"].(string); sid != "" {
+					browser.sessionID = sid
+				}
+			}
+		}
+	}
+}
+
+func (g *gateway) handleBrowserInbound(browser *browserSock, payload []byte) []byte {
+	if browser == nil || browser.wsPath != "/ws/chat" {
+		return payload
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return payload
+	}
+	typ, _ := msg["type"].(string)
+	switch typ {
+	case "batch":
+		items, _ := msg["items"].([]any)
+		filtered := make([]any, 0, len(items))
+		for _, raw := range items {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				filtered = append(filtered, raw)
+				continue
+			}
+			b, err := json.Marshal(item)
+			if err != nil {
+				filtered = append(filtered, raw)
+				continue
+			}
+			next := g.handleBrowserInbound(browser, b)
+			if len(next) == 0 {
+				continue
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(next, &decoded); err != nil {
+				continue
+			}
+			filtered = append(filtered, decoded)
+		}
+		msg["items"] = filtered
+		if len(filtered) == 0 {
+			return nil
+		}
+		out, _ := json.Marshal(msg)
+		return out
+	case "notification":
+		return nil
+	case "session-created":
+		if sid, _ := msg["sessionId"].(string); sid != "" {
+			browser.sessionID = sid
+		}
+		if agent, _ := msg["agent"].(string); agent != "" {
+			browser.agent = agent
+		}
+	case "result":
+		if isErr, _ := msg["is_error"].(bool); isErr {
+			return payload
+		}
+		if sid, _ := msg["sessionId"].(string); sid != "" {
+			browser.sessionID = sid
+		}
+		resultPreview, _ := msg["result"].(string)
+		g.emitNotification(browser, browser.sessionID, resultPreview)
+	case "complete":
+		if aborted, _ := msg["aborted"].(bool); aborted {
+			browser.notifySent = false
+			return payload
+		}
+		if sid, _ := msg["sessionId"].(string); sid != "" {
+			browser.sessionID = sid
+		}
+		if !browser.notifySent {
+			g.emitNotification(browser, browser.sessionID, "")
+		}
+		browser.notifySent = false
+	case "error":
+		browser.notifySent = false
+	}
+	return payload
 }
 
 func (g *gateway) getMachine(id string) *machine {
@@ -480,7 +780,10 @@ func (g *gateway) handleMachineMessage(msg *ctrlMsg) {
 		browser := g.activeTunnels[msg.TunnelID]
 		g.tunMu.Unlock()
 		if browser != nil {
-			_ = browser.write(websocket.TextMessage, []byte(msg.Data))
+			payload := g.handleBrowserInbound(browser, []byte(msg.Data))
+			if len(payload) > 0 {
+				_ = browser.write(websocket.TextMessage, payload)
+			}
 		}
 	case "ws-close":
 		g.tunMu.Lock()
@@ -677,7 +980,7 @@ func (g *gateway) handleMachineConnect(w http.ResponseWriter, r *http.Request) {
 
 // openBrowserTunnel upgrades the browser connection and relays through a machine.
 // edgeQuery is the query string sent to the edge (must include edge auth).
-func (g *gateway) openBrowserTunnel(w http.ResponseWriter, r *http.Request, machineID, wsPath, edgeQuery string) {
+func (g *gateway) openBrowserTunnel(w http.ResponseWriter, r *http.Request, user, machineID, wsPath, edgeQuery string) {
 	if g.getMachine(machineID) == nil {
 		http.Error(w, "Machine not connected", http.StatusServiceUnavailable)
 		return
@@ -702,7 +1005,7 @@ func (g *gateway) openBrowserTunnel(w http.ResponseWriter, r *http.Request, mach
 		return
 	}
 
-	sock := &browserSock{conn: browser}
+	sock := &browserSock{conn: browser, user: user, machineID: machineID, wsPath: wsPath}
 	_ = browser.SetReadDeadline(time.Now().Add(browserPongWait))
 	browser.SetPongHandler(func(string) error {
 		return browser.SetReadDeadline(time.Now().Add(browserPongWait))
@@ -743,6 +1046,7 @@ func (g *gateway) openBrowserTunnel(w http.ResponseWriter, r *http.Request, mach
 		if err != nil {
 			return
 		}
+		g.handleBrowserOutbound(sock, data)
 		m := g.getMachine(machineID)
 		if m == nil {
 			return
@@ -768,6 +1072,7 @@ func (g *gateway) handleHubBrowserWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	claims, _ := g.verifyHubToken(tok)
 	machineID := r.URL.Query().Get("machine")
 	if machineID == "" {
 		http.Error(w, "machine query required", http.StatusBadRequest)
@@ -784,14 +1089,18 @@ func (g *gateway) handleHubBrowserWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	edgeQuery := "?" + q.Encode()
-	g.openBrowserTunnel(w, r, machineID, r.URL.Path, edgeQuery)
+	user := ""
+	if claims != nil {
+		user = claims.Sub
+	}
+	g.openBrowserTunnel(w, r, user, machineID, r.URL.Path, edgeQuery)
 }
 
 // Legacy: /machine/:id/ws/...
 func (g *gateway) handleLegacyBrowserWS(w http.ResponseWriter, r *http.Request, machineID, wsPath string) {
 	edgeQuery := "token=" + url.QueryEscape(g.token) + "&hub=1"
 	// If browser already sent a hub token, still use machine token toward edge
-	g.openBrowserTunnel(w, r, machineID, wsPath, edgeQuery)
+	g.openBrowserTunnel(w, r, "", machineID, wsPath, edgeQuery)
 }
 
 // ── router ────────────────────────────────────────────────────────────────────
@@ -861,6 +1170,12 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case path == "/api/sessions/meta":
 		g.handleSessionMeta(w, r)
+		return
+	case path == "/api/notifications" && r.Method == http.MethodGet:
+		g.handleNotifications(w, r)
+		return
+	case path == "/api/notifications/read" && r.Method == http.MethodPost:
+		g.handleNotifications(w, r)
 		return
 	case path == "/api/projects/notes":
 		g.handleProjectNotes(w, r)

@@ -5,6 +5,7 @@ import { ctx, isProcessing, currentProject, currentTab, currentModel, currentEff
          addCustomModel, chatDensity, wsStatus } from './state.js';
 import { sendWs, api, authHeaders, flushWsQueue, clearWsQueue } from './api.js';
 import { initWakeLock, setWakeLockDesired } from './wake-lock.js';
+import { pushNotification } from './notifications.js';
 
 function assistantLabel() {
   return AGENT_LABELS[currentAgent.peek()] || 'Assistant';
@@ -331,6 +332,10 @@ function handleWsMessage(msg) {
     if (msg.agent) setAgent(msg.agent);
     // Notify shell to refresh session list — use custom event to avoid circular import
     document.dispatchEvent(new CustomEvent('sessions-changed'));
+    return;
+  }
+  if (msg.type === 'notification' && msg.notification) {
+    pushNotification(msg.notification);
     return;
   }
   if (msg.type === 'result') {

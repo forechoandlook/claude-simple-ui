@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ func (g *gateway) isHubLocalAPI(path string) bool {
 	switch {
 	case path == "/api/hub", path == "/api/machines",
 		path == "/api/auth/status", path == "/api/auth/login", path == "/api/auth/register",
+		path == "/api/notifications", path == "/api/notifications/read",
 		path == "/api/sessions", path == "/api/projects", path == "/api/activity",
 		path == "/api/sessions/meta",
 		path == "/api/projects/notes",
@@ -267,6 +269,48 @@ func (g *gateway) handleAggregateSessionMeta(w http.ResponseWriter, r *http.Requ
 		out[k] = v
 	}
 	writeJSON(w, out)
+}
+
+func (g *gateway) handleNotifications(w http.ResponseWriter, r *http.Request) {
+	claims, ok := g.requireHubAuth(w, r)
+	if !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		limit := 50
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil {
+				limit = parsed
+			}
+		}
+		if limit <= 0 || limit > 200 {
+			limit = 50
+		}
+		writeJSON(w, map[string]any{
+			"notifications": g.store.listNotifications(claims.Sub, limit),
+			"unreadCount":   g.store.unreadNotificationCount(claims.Sub),
+		})
+	case http.MethodPost:
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, `{"error":"bad json"}`, http.StatusBadRequest)
+			return
+		}
+		rows, unread, err := g.store.markNotificationsRead(claims.Sub, body.IDs)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"notifications": rows,
+			"unreadCount":   unread,
+		})
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
 }
 
 // maybeImportSessionMetaFromEdges copies edge .session_meta once into hub-data.

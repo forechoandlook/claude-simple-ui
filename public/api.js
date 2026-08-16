@@ -22,6 +22,8 @@ function isHubOnlyPath(path) {
   const p = path.split('?')[0];
   return p === '/api/hub'
     || p === '/api/machines'
+    || p === '/api/notifications'
+    || p === '/api/notifications/read'
     || p === '/api/ai/notes'
     || p.startsWith('/api/ai/notes/')
     || p.startsWith('/api/auth/');

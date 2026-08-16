@@ -69,6 +69,13 @@ export const AppShell = (opts = {}) => {
           <span class="text-[10px] opacity-50">▾</span>
         </button>
       </div>
+      <div id="notifications-wrap" class="relative flex-shrink-0">
+        <button type="button" id="btn-notifications" class="btn btn-ghost btn-xs border border-base-300 gap-1 min-h-8 px-2"
+                title="通知" aria-haspopup="dialog" aria-expanded="false">
+          <span>🔔</span>
+          <span id="notifications-badge" class="hidden inline-flex min-w-5 h-5 px-1 items-center justify-center rounded-full bg-error text-error-content text-[10px] font-bold">0</span>
+        </button>
+      </div>
       <span id="topbar-project" class="text-sm text-base-content/50 flex-1 truncate min-w-0">Select a session</span>
       <span id="conn-dot" class="w-2 h-2 rounded-full bg-base-content/30 flex-shrink-0" title="连接状态"></span>
       <div class="flex gap-2 topbar-actions">
@@ -92,6 +99,17 @@ export const AppShell = (opts = {}) => {
       </div>
       <div id="recent-menu-list" class="flex flex-col gap-0.5"></div>
       <p id="recent-menu-empty" class="text-xs text-base-content/40 px-1 py-2 hidden">暂无最近会话</p>
+    </div>
+    <div id="notifications-backdrop" class="hidden fixed inset-0 z-[55] bg-black/40" aria-hidden="true"></div>
+    <div id="notifications-menu" class="hidden fixed z-[60] w-[min(26rem,calc(100vw-1rem))] max-h-[min(30rem,75vh)] overflow-y-auto
+         rounded-lg border border-base-300 bg-base-100 shadow-xl p-2"
+         role="dialog" aria-label="通知中心">
+      <div class="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-base-300 sticky top-0 bg-base-100 z-[1]">
+        <span class="text-[10px] uppercase tracking-wide text-base-content/45 font-semibold">通知</span>
+        <button type="button" id="btn-notifications-read-all" class="btn btn-ghost btn-xs px-1 text-[10px]">全部已读</button>
+      </div>
+      <div id="notifications-menu-list" class="flex flex-col gap-1"></div>
+      <p id="notifications-menu-empty" class="text-xs text-base-content/40 px-1 py-2 hidden">暂无通知</p>
     </div>
     <!-- Hub: only when no remembered machine (or last one offline) -->
     <div id="machine-picker" class="hidden fixed inset-0 z-[60] bg-base-100 flex items-center justify-center p-4">
